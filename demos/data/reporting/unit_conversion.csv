@@ -1,0 +1,4 @@
+group_id,unit,conversion_factor,is_base
+speed,m/s,1.0,true
+speed,km/h,0.277778,false
+rotation,RPM,1.0,true

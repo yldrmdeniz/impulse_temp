@@ -1,0 +1,4 @@
+channel_alias,source_channel,priority,source_unit,target_unit
+vehicle_speed,Vehicle Speed Sensor,1,km/h,m/s
+vehicle_speed,veh_spd_ms,2,m/s,m/s
+engine_speed,Engine RPM,1,RPM,RPM
