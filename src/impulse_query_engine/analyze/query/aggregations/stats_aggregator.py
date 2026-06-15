@@ -45,7 +45,7 @@ class StatsAggregator(Aggregation):
             When evaluated, each expression will yield a SampleSeries.
         statistics : list of str
             List of statistic types to compute (e.g., ['min', 'max', 'mean', 'median']).
-            Supported numeric statistics: 'min', 'max', 'mean', 'median'.
+            Supported numeric statistics: 'min', 'max', 'mean', 'median', 'diff_start_end'.
             Supported string statistics: 'mode', 'unique_count'.
             Special statistics: 'start' (first value), 'end' (last value).
         event_expression : TimeSeriesExpression
@@ -58,7 +58,9 @@ class StatsAggregator(Aggregation):
 
         # Separate numeric and string statistics for processing
         self._numeric_stats = [
-            s for s in statistics if s in NUMERIC_STATISTICS or s in {"start", "end"}
+            s
+            for s in statistics
+            if s in NUMERIC_STATISTICS or s in {"start", "end", "diff_start_end"}
         ]
         self._string_stats = [s for s in statistics if s in STRING_STATISTICS]
 
@@ -219,11 +221,15 @@ class StatsAggregator(Aggregation):
                 results["mean"] = mean
             elif stat == "median":
                 results["median"] = float(self.weighted_median(durations=durations, values=values))
+            elif stat == "diff_start_end":
+                results["diff_start_end"] = (
+                    sample_series.values[mask][-1] - sample_series.values[mask][0]
+                )
             else:
                 raise ValueError(
                     f"Unsupported statistic type: {stat}\n"
                     "Available options are 'min', 'max', 'mean', "
-                    "'median', 'start', 'end'."
+                    "'median', 'start', 'end', 'diff_start_end'."
                 )
 
         return results
