@@ -85,3 +85,5 @@ yarn-error.log*
 # Claude Code
 .claude/
 CLAUDE.md
+
+*.lock
