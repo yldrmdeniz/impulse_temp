@@ -255,6 +255,7 @@ class Histogram(Aggregation, ABC):
             .withColumn("upper_bound", f.col("hist_bins").getItem(f.col("bin_ID") + 1))
             .withColumn("bin_name", f.concat_ws("-", "lower_bound", "upper_bound"))
             .withColumn("visual_id", Histogram.get_visual_id_column(aggregations, "hist_name"))
+            .withColumn("unit", f.lit(None).cast("string"))
             .select(HISTOGRAM_FACT_SCHEMA.fieldNames())
         )
         return df

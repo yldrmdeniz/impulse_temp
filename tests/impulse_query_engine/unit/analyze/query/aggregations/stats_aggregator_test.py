@@ -578,3 +578,25 @@ def test_stats_aggregator_get_selectors_with_event():
     assert len(result) == 2
     assert sel in result
     assert evt in result
+
+
+def test_stats_aggregator_validates_unsupported_statistics():
+    """StatsAggregator raises ValueError for unsupported statistic types."""
+    import pytest
+
+    with pytest.raises(ValueError, match="Unsupported statistic type"):
+        StatsAggregator(
+            input_expressions=[],
+            event_expression=None,
+            statistics=["min", "invalid_stat", "bogus"],
+        )
+
+
+def test_stats_aggregator_accepts_all_supported_statistics():
+    """StatsAggregator accepts all supported statistic types without error."""
+    agg = StatsAggregator(
+        input_expressions=[],
+        event_expression=None,
+        statistics=["min", "max", "mean", "median", "start", "end"],
+    )
+    assert agg.statistics == ["min", "max", "mean", "median", "start", "end"]

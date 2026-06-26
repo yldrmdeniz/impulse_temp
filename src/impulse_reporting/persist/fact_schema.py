@@ -17,6 +17,7 @@ HISTOGRAM_FACT_SCHEMA = StructType(
         StructField("lower_bound", DoubleType(), False),
         StructField("upper_bound", DoubleType(), False),
         StructField("bin_name", StringType(), False),
+        StructField("unit", StringType(), True),
     ]
 )
 
@@ -34,6 +35,7 @@ HISTOGRAM2D_FACT_SCHEMA = StructType(
         StructField("y_upper_bound", DoubleType(), False),
         StructField("x_bin_name", StringType(), False),
         StructField("y_bin_name", StringType(), False),
+        StructField("unit", StringType(), True),
     ]
 )
 
@@ -56,5 +58,6 @@ STATS_AGGREGATOR_FACT_SCHEMA = StructType(
         StructField("event_instance_id", LongType(), False),
         StructField("aggregation_label", StringType(), False),
         StructField("statistic_value", DoubleType(), False),
+        StructField("unit", StringType(), True),
     ]
 )

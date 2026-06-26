@@ -263,6 +263,7 @@ class Histogram2D(Aggregation, ABC):
             .transform(Histogram2D._explode_histogram2d_values)
             .transform(Histogram2D._extract_histogram2d_bin_info)
             .transform(Histogram2D._add_visual_id_column(aggregations))
+            .withColumn("unit", f.lit(None).cast("string"))
             .select(HISTOGRAM2D_FACT_SCHEMA.fieldNames())
         )
         return df

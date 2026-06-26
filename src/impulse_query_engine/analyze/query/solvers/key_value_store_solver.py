@@ -153,6 +153,8 @@ class KeyValueStoreSolver(QuerySolver):
             timestamp_col_name="timestamp",
             drop_implausible_data_points=self.drop_implausible_data,
         )
+        self.skipped_channels_df: "DataFrame | None" = None
+        self.channel_units: dict[int, str | None] = {}
 
     # ------------------------------------------------------------------
     # Solver stages
@@ -689,7 +691,7 @@ class KeyValueStoreSolver(QuerySolver):
         - ``_src_factor`` converts a value in ``S`` to the base unit of ``G``.
         - ``_tgt_factor`` converts a value in ``T`` to the base unit of ``G``.
         - The combined factor that converts ``S`` to ``T`` is
-          ``_src_factor / _tgt_factor``.
+          ``_tgt_factor / _src_factor``.
 
         Rows whose source or target unit is missing on the table — or whose
         source/target units belong to different families — receive a null
@@ -761,7 +763,7 @@ class KeyValueStoreSolver(QuerySolver):
 
         channels_df = channels_df.withColumn(
             factor_col,
-            F.col("_src_factor") / F.col("_tgt_factor"),
+            F.col("_tgt_factor") / F.col("_src_factor"),
         ).drop("_src_factor", "_src_group_id", "_tgt_factor")
 
         return channels_df
@@ -836,8 +838,42 @@ class KeyValueStoreSolver(QuerySolver):
             source_unit_col in channels_df.columns and target_unit_col in channels_df.columns
         )
 
+        # Case 6 exclusion: channels with target_unit set but NO source_unit
+        if has_unit_cols:
+            case6_mask = F.col(source_unit_col).isNull() & F.col(target_unit_col).isNotNull()
+            skipped_df = channels_df.where(case6_mask).select(
+                self.config.container_id_col,
+                self.config.channel_id_col,
+                target_unit_col,
+            )
+            skipped_count = skipped_df.count()
+            if skipped_count > 0:
+                self.skipped_channels_df = skipped_df
+            channels_df = channels_df.where(~case6_mask)
+
         if has_conversion_table and has_unit_cols:
             channels_df = self._compute_conversion_factors(self.spark, query, channels_df)
+
+        # Effective unit computation
+        if has_unit_cols:
+            _eff_unit_expr = (
+                F.when(F.col(target_unit_col).isNotNull(), F.col(target_unit_col))
+                .when(
+                    F.col(source_unit_col).isNotNull() & (F.col(source_unit_col) != F.lit("-")),
+                    F.col(source_unit_col),
+                )
+                .otherwise(F.lit(None))
+            )
+
+            if "selector_ids" in channels_df.columns:
+                unit_rows = (
+                    channels_df.withColumn("_eff_unit", _eff_unit_expr)
+                    .select(F.explode("selector_ids").alias("_sid"), "_eff_unit")
+                    .groupBy("_sid")
+                    .agg(F.first("_eff_unit", ignorenulls=True).alias("_unit"))
+                    .collect()
+                )
+                self.channel_units = {row["_sid"]: row["_unit"] for row in unit_rows}
 
         for col_name in (source_unit_col, target_unit_col):
             if col_name in channels_df.columns:

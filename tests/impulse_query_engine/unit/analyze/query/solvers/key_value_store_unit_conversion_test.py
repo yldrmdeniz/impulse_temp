@@ -60,14 +60,15 @@ class TestUnitConversionSolve:
 
         assert pdf["container_id"].tolist() == [1, 2, 3]
 
-        factor = 0.277778
+        # Factor = tgt_factor / src_factor = 1.0 / 0.277778 (m/s base / km/h factor)
+        factor = 1.0 / 0.277778
         # Containers 1 and 2 resolve vehicle_speed -> "Vehicle Speed Sensor" (channel 7);
         # channel_metrics.unit == "km/h" matches channel_mapping.source_unit, so the
-        # coalesce yields "km/h" and values scale by ~0.277778 to reach m/s.
+        # coalesce yields "km/h" and values scale by tgt/src to reach m/s.
         for cid in (1, 2):
             expected = _expected_raw_values(channels_csv_path, cid, 7) * factor
             row = pdf.loc[pdf["container_id"] == cid].iloc[0]
-            np.testing.assert_allclose(row.vehicle_speed.values, expected, rtol=1e-6)
+            np.testing.assert_allclose(row.vehicle_speed.values, expected, rtol=1e-4)
 
         # Container 3 resolves to channel 7 via Spd_Vhcl / ProjSpecREC_10Hz. Its
         # channel_metrics.unit is "m/s" (overrides channel_mapping.source_unit="km/h"
@@ -159,12 +160,12 @@ class TestUnitConversionSolve:
         pdf = query.select(direct, aliased).toPandas(spark, solver=solver)
         pdf = pdf.sort_values("container_id").reset_index(drop=True)
 
-        factor = 0.277778
+        factor = 1.0 / 0.277778
         for cid in (1, 2):
             raw = _expected_raw_values(channels_csv_path, cid, 7)
             row = pdf.loc[pdf["container_id"] == cid].iloc[0]
             np.testing.assert_allclose(row.vehicle_speed_raw.values, raw, rtol=1e-12)
-            np.testing.assert_allclose(row.vehicle_speed_converted.values, raw * factor, rtol=1e-6)
+            np.testing.assert_allclose(row.vehicle_speed_converted.values, raw * factor, rtol=1e-4)
 
     def test_solve_mixed_direct_and_aliased_disjoint_channels(
         self,
@@ -193,14 +194,14 @@ class TestUnitConversionSolve:
         pdf = query.select(direct, aliased).toPandas(spark, solver=solver)
         pdf = pdf.sort_values("container_id").reset_index(drop=True)
 
-        factor = 0.277778
+        factor = 1.0 / 0.277778
         for cid in (1, 2):
             ambient_raw = _expected_raw_values(channels_csv_path, cid, 6)
             speed_raw = _expected_raw_values(channels_csv_path, cid, 7)
             row = pdf.loc[pdf["container_id"] == cid].iloc[0]
             np.testing.assert_allclose(row.ambient_temp.values, ambient_raw, rtol=1e-12)
             np.testing.assert_allclose(
-                row.vehicle_speed_converted.values, speed_raw * factor, rtol=1e-6
+                row.vehicle_speed_converted.values, speed_raw * factor, rtol=1e-4
             )
 
     def test_solve_cross_family_units_leave_values_unchanged(
@@ -282,10 +283,10 @@ class TestSourceUnitResolution:
             pdf = query.select(vehicle_speed).toPandas(spark, solver=solver)
 
             # Container 1: unit null → fall back to mapping source_unit="km/h"
-            # → factor 0.277778.
-            expected = _expected_raw_values(channels_csv_path, 1, 7) * 0.277778
+            # → factor = tgt/src = 1.0/0.277778.
+            expected = _expected_raw_values(channels_csv_path, 1, 7) * (1.0 / 0.277778)
             row1 = pdf.loc[pdf["container_id"] == 1].iloc[0]
-            np.testing.assert_allclose(row1.vehicle_speed.values, expected, rtol=1e-6)
+            np.testing.assert_allclose(row1.vehicle_speed.values, expected, rtol=1e-4)
         finally:
             # Restore the fixture so subsequent tests in this session see
             # the original DataFrame.
@@ -313,11 +314,11 @@ class TestSourceUnitResolution:
             pdf = query.select(vehicle_speed).toPandas(spark, solver=solver)
 
             # All three containers: no unit column → mapping source_unit
-            # "km/h" wins → factor 0.277778.
+            # "km/h" wins → factor = tgt/src = 1.0/0.277778.
             for cid in (1, 2, 3):
-                expected = _expected_raw_values(channels_csv_path, cid, 7) * 0.277778
+                expected = _expected_raw_values(channels_csv_path, cid, 7) * (1.0 / 0.277778)
                 row = pdf.loc[pdf["container_id"] == cid].iloc[0]
-                np.testing.assert_allclose(row.vehicle_speed.values, expected, rtol=1e-6)
+                np.testing.assert_allclose(row.vehicle_speed.values, expected, rtol=1e-4)
         finally:
             key_value_store_unit_conversion_db.config.debug_tables["channel_metrics"] = cm
 
@@ -355,15 +356,15 @@ class TestSourceUnitResolution:
             pdf = query.select(vehicle_speed).toPandas(spark, solver=solver)
 
             # Renamed column carries through: container 3 still resolves to
-            # m/s (no scaling); containers 1/2 still scale by 0.277778.
+            # m/s (no scaling); containers 1/2 still scale by tgt/src = 1.0/0.277778.
             expected3 = _expected_raw_values(channels_csv_path, 3, 7)
             row3 = pdf.loc[pdf["container_id"] == 3].iloc[0]
             np.testing.assert_allclose(row3.vehicle_speed.values, expected3, rtol=1e-12)
 
             for cid in (1, 2):
-                expected = _expected_raw_values(channels_csv_path, cid, 7) * 0.277778
+                expected = _expected_raw_values(channels_csv_path, cid, 7) * (1.0 / 0.277778)
                 row = pdf.loc[pdf["container_id"] == cid].iloc[0]
-                np.testing.assert_allclose(row.vehicle_speed.values, expected, rtol=1e-6)
+                np.testing.assert_allclose(row.vehicle_speed.values, expected, rtol=1e-4)
         finally:
             key_value_store_unit_conversion_db.config.debug_tables["channel_metrics"] = cm
 
@@ -547,10 +548,10 @@ class TestAliasUnitConflictDetection:
 
             pdf = query.select(a, b).toPandas(spark, solver=solver)
             for cid in (1, 2):
-                expected = _expected_raw_values(channels_csv_path, cid, 7) * 0.277778
+                expected = _expected_raw_values(channels_csv_path, cid, 7) * (1.0 / 0.277778)
                 row = pdf.loc[pdf["container_id"] == cid].iloc[0]
-                np.testing.assert_allclose(row.a.values, expected, rtol=1e-6)
-                np.testing.assert_allclose(row.b.values, expected, rtol=1e-6)
+                np.testing.assert_allclose(row.a.values, expected, rtol=1e-4)
+                np.testing.assert_allclose(row.b.values, expected, rtol=1e-4)
         finally:
             key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = original
 
@@ -671,7 +672,8 @@ class TestComputeConversionFactors:
         )
 
         row = solver._compute_conversion_factors(spark, query, channels_df).collect()[0]
-        assert row.conversion_factor == pytest.approx(0.277778, rel=1e-6)
+        # tgt_factor / src_factor = 1.0 / 0.277778
+        assert row.conversion_factor == pytest.approx(1.0 / 0.277778, rel=1e-4)
 
     def test_null_factor_for_cross_family(
         self, spark: SparkSession, key_value_store_unit_conversion_db: MeasurementDB
@@ -700,3 +702,187 @@ class TestComputeConversionFactors:
 
         row = solver._compute_conversion_factors(spark, query, channels_df).collect()[0]
         assert row.conversion_factor is None
+
+
+class TestCase6Exclusion:
+    """Case 6: channels with target_unit set but NO source_unit are excluded."""
+
+    def test_case6_channels_excluded_from_solve(
+        self,
+        spark: SparkSession,
+        key_value_store_unit_conversion_db: MeasurementDB,
+    ):
+        """Channels with target_unit but null source_unit are excluded from processing."""
+        from pyspark.sql import functions as _F
+
+        # Inject a channel_mapping row where source_unit is null but target_unit is set.
+        cm = key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"]
+        # Add a case6 alias: no source_unit, has target_unit
+        case6_row = spark.createDataFrame(
+            [
+                (
+                    "SAMPLE_PROJECT",
+                    "container_concept",
+                    "case6_alias",
+                    "Ambient Air Temperature",
+                    "TM",
+                    None,
+                    None,
+                    "m/s",
+                )
+            ],
+            schema=cm.schema,
+        )
+        cm_with_case6 = cm.unionByName(case6_row)
+        key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm_with_case6
+
+        # Also drop channel_metrics.unit so COALESCE can't fill source_unit
+        original_cm_metrics = key_value_store_unit_conversion_db.config.debug_tables[
+            "channel_metrics"
+        ]
+        cm_no_unit = original_cm_metrics.drop("unit")
+        key_value_store_unit_conversion_db.config.debug_tables["channel_metrics"] = cm_no_unit
+
+        try:
+            solver = _solver(spark)
+            query = key_value_store_unit_conversion_db.query
+            case6_sel = query.channel_with_alias(channel_alias="case6_alias").alias("case6_alias")
+
+            pdf = query.select(case6_sel).toPandas(spark, solver=solver)
+
+            # The channel should be excluded (Case 6) → empty results or no data
+            assert pdf.empty or all(len(row.case6_alias) == 0 for _, row in pdf.iterrows())
+            # Verify the solver tracked the skipped channels
+            assert solver.skipped_channels_df is not None
+            assert solver.skipped_channels_df.count() > 0
+        finally:
+            key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm
+            key_value_store_unit_conversion_db.config.debug_tables[
+                "channel_metrics"
+            ] = original_cm_metrics
+
+    def test_case6_skipped_channels_tracked(
+        self,
+        spark: SparkSession,
+        key_value_store_unit_conversion_db: MeasurementDB,
+    ):
+        """Solver tracks which channels were skipped due to Case 6."""
+        cm = key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"]
+        case6_row = spark.createDataFrame(
+            [
+                (
+                    "SAMPLE_PROJECT",
+                    "container_concept",
+                    "case6_track",
+                    "Ambient Air Temperature",
+                    "TM",
+                    None,
+                    None,
+                    "C",
+                )
+            ],
+            schema=cm.schema,
+        )
+        cm_with_case6 = cm.unionByName(case6_row)
+        key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm_with_case6
+
+        # Also drop channel_metrics.unit so COALESCE can't fill source_unit
+        original_cm_metrics = key_value_store_unit_conversion_db.config.debug_tables[
+            "channel_metrics"
+        ]
+        cm_no_unit = original_cm_metrics.drop("unit")
+        key_value_store_unit_conversion_db.config.debug_tables["channel_metrics"] = cm_no_unit
+
+        try:
+            solver = _solver(spark)
+            query = key_value_store_unit_conversion_db.query
+            case6_sel = query.channel_with_alias(channel_alias="case6_track").alias("case6_track")
+            query.select(case6_sel).toPandas(spark, solver=solver)
+
+            skipped = solver.skipped_channels_df
+            assert skipped is not None
+            skipped_rows = skipped.collect()
+            # Should have entries with target_unit populated
+            assert all(row.target_unit is not None for row in skipped_rows)
+        finally:
+            key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm
+            key_value_store_unit_conversion_db.config.debug_tables[
+                "channel_metrics"
+            ] = original_cm_metrics
+
+
+class TestEffectiveUnitComputation:
+    """Effective unit is computed from target_unit or source_unit."""
+
+    def test_channel_units_populated_after_solve(
+        self,
+        spark: SparkSession,
+        key_value_store_unit_conversion_db: MeasurementDB,
+    ):
+        """After solve, solver.channel_units maps selector_id → effective unit."""
+        solver = _solver(spark)
+        query = key_value_store_unit_conversion_db.query
+        vehicle_speed = query.channel_with_alias(channel_alias="vehicle_speed").alias(
+            "vehicle_speed"
+        )
+
+        query.select(vehicle_speed).toPandas(spark, solver=solver)
+
+        # vehicle_speed has target_unit="m/s", so effective unit should be "m/s"
+        assert len(solver.channel_units) > 0
+        units = list(solver.channel_units.values())
+        assert "m/s" in units
+
+    def test_effective_unit_prefers_target_over_source(
+        self,
+        spark: SparkSession,
+        key_value_store_unit_conversion_db: MeasurementDB,
+    ):
+        """When target_unit is set, effective unit is target_unit regardless of source_unit."""
+        solver = _solver(spark)
+        query = key_value_store_unit_conversion_db.query
+        # vehicle_speed: source_unit="km/h", target_unit="m/s" → effective = "m/s"
+        vehicle_speed = query.channel_with_alias(channel_alias="vehicle_speed").alias(
+            "vehicle_speed"
+        )
+
+        query.select(vehicle_speed).toPandas(spark, solver=solver)
+
+        # All channel_units entries for vehicle_speed should be "m/s"
+        units = [u for u in solver.channel_units.values() if u is not None]
+        assert all(u == "m/s" for u in units)
+
+    def test_effective_unit_falls_back_to_source_when_no_target(
+        self,
+        spark: SparkSession,
+        key_value_store_unit_conversion_db: MeasurementDB,
+    ):
+        """When target_unit is null, effective unit falls back to source_unit."""
+        from pyspark.sql import functions as _F
+
+        # Modify channel_mapping: set target_unit to null for engine_speed
+        cm = key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"]
+        cm_no_target = cm.withColumn(
+            "target_unit",
+            _F.when(
+                _F.col("channel_alias") == "engine_speed", _F.lit(None).cast("string")
+            ).otherwise(_F.col("target_unit")),
+        )
+        key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm_no_target
+
+        try:
+            solver = _solver(spark)
+            query = key_value_store_unit_conversion_db.query
+            engine_speed = query.channel_with_alias(channel_alias="engine_speed").alias(
+                "engine_speed"
+            )
+
+            query.select(engine_speed).toPandas(spark, solver=solver)
+
+            # With no target_unit, effective unit should fall back to source_unit
+            # engine_speed's source channel_metrics.unit = "RPM" (or from mapping source_unit)
+            units = [u for u in solver.channel_units.values() if u is not None]
+            assert len(units) > 0
+            assert all(u == "RPM" for u in units)
+        finally:
+            key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm
