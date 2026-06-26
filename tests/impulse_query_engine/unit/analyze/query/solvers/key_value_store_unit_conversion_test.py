@@ -704,10 +704,10 @@ class TestComputeConversionFactors:
         assert row.conversion_factor is None
 
 
-class TestCase6Exclusion:
-    """Case 6: channels with target_unit set but NO source_unit are excluded."""
+class TestTargetWithoutSourceUnitExclusion:
+    """Channels with target_unit set but NO source_unit are excluded."""
 
-    def test_case6_channels_excluded_from_solve(
+    def test_target_without_source_unit_channels_excluded_from_solve(
         self,
         spark: SparkSession,
         key_value_store_unit_conversion_db: MeasurementDB,
@@ -717,13 +717,13 @@ class TestCase6Exclusion:
 
         # Inject a channel_mapping row where source_unit is null but target_unit is set.
         cm = key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"]
-        # Add a case6 alias: no source_unit, has target_unit
-        case6_row = spark.createDataFrame(
+        # Add an alias with no source_unit but has target_unit
+        no_source_unit_row = spark.createDataFrame(
             [
                 (
                     "SAMPLE_PROJECT",
                     "container_concept",
-                    "case6_alias",
+                    "no_source_unit_alias",
                     "Ambient Air Temperature",
                     "TM",
                     None,
@@ -733,8 +733,10 @@ class TestCase6Exclusion:
             ],
             schema=cm.schema,
         )
-        cm_with_case6 = cm.unionByName(case6_row)
-        key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm_with_case6
+        cm_with_no_source_unit = cm.unionByName(no_source_unit_row)
+        key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = (
+            cm_with_no_source_unit
+        )
 
         # Also drop channel_metrics.unit so COALESCE can't fill source_unit
         original_cm_metrics = key_value_store_unit_conversion_db.config.debug_tables[
@@ -746,12 +748,16 @@ class TestCase6Exclusion:
         try:
             solver = _solver(spark)
             query = key_value_store_unit_conversion_db.query
-            case6_sel = query.channel_with_alias(channel_alias="case6_alias").alias("case6_alias")
+            no_source_unit_sel = query.channel_with_alias(
+                channel_alias="no_source_unit_alias"
+            ).alias("no_source_unit_alias")
 
-            pdf = query.select(case6_sel).toPandas(spark, solver=solver)
+            pdf = query.select(no_source_unit_sel).toPandas(spark, solver=solver)
 
-            # The channel should be excluded (Case 6) → empty results or no data
-            assert pdf.empty or all(len(row.case6_alias) == 0 for _, row in pdf.iterrows())
+            # The channel should be excluded (target_unit without source_unit) → empty results or no data
+            assert pdf.empty or all(
+                len(row.no_source_unit_alias) == 0 for _, row in pdf.iterrows()
+            )
             # Verify the solver tracked the skipped channels
             assert solver.skipped_channels_df is not None
             assert solver.skipped_channels_df.count() > 0
@@ -761,19 +767,19 @@ class TestCase6Exclusion:
                 original_cm_metrics
             )
 
-    def test_case6_skipped_channels_tracked(
+    def test_target_without_source_unit_skipped_channels_tracked(
         self,
         spark: SparkSession,
         key_value_store_unit_conversion_db: MeasurementDB,
     ):
-        """Solver tracks which channels were skipped due to Case 6."""
+        """Solver tracks which channels were skipped due to missing source_unit."""
         cm = key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"]
-        case6_row = spark.createDataFrame(
+        no_source_unit_row = spark.createDataFrame(
             [
                 (
                     "SAMPLE_PROJECT",
                     "container_concept",
-                    "case6_track",
+                    "no_source_unit_track",
                     "Ambient Air Temperature",
                     "TM",
                     None,
@@ -783,8 +789,10 @@ class TestCase6Exclusion:
             ],
             schema=cm.schema,
         )
-        cm_with_case6 = cm.unionByName(case6_row)
-        key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm_with_case6
+        cm_with_no_source_unit = cm.unionByName(no_source_unit_row)
+        key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = (
+            cm_with_no_source_unit
+        )
 
         # Also drop channel_metrics.unit so COALESCE can't fill source_unit
         original_cm_metrics = key_value_store_unit_conversion_db.config.debug_tables[
@@ -796,8 +804,10 @@ class TestCase6Exclusion:
         try:
             solver = _solver(spark)
             query = key_value_store_unit_conversion_db.query
-            case6_sel = query.channel_with_alias(channel_alias="case6_track").alias("case6_track")
-            query.select(case6_sel).toPandas(spark, solver=solver)
+            no_source_unit_sel = query.channel_with_alias(
+                channel_alias="no_source_unit_track"
+            ).alias("no_source_unit_track")
+            query.select(no_source_unit_sel).toPandas(spark, solver=solver)
 
             skipped = solver.skipped_channels_df
             assert skipped is not None

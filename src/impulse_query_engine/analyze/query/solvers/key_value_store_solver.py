@@ -838,10 +838,12 @@ class KeyValueStoreSolver(QuerySolver):
             source_unit_col in channels_df.columns and target_unit_col in channels_df.columns
         )
 
-        # Case 6 exclusion: channels with target_unit set but NO source_unit
+        # Exclusion: channels with target_unit set but no source_unit
         if has_unit_cols:
-            case6_mask = F.col(source_unit_col).isNull() & F.col(target_unit_col).isNotNull()
-            skipped_df = channels_df.where(case6_mask).select(
+            target_without_source_unit_mask = (
+                F.col(source_unit_col).isNull() & F.col(target_unit_col).isNotNull()
+            )
+            skipped_df = channels_df.where(target_without_source_unit_mask).select(
                 self.config.container_id_col,
                 self.config.channel_id_col,
                 target_unit_col,
@@ -849,7 +851,7 @@ class KeyValueStoreSolver(QuerySolver):
             skipped_count = skipped_df.count()
             if skipped_count > 0:
                 self.skipped_channels_df = skipped_df
-            channels_df = channels_df.where(~case6_mask)
+            channels_df = channels_df.where(~target_without_source_unit_mask)
 
         if has_conversion_table and has_unit_cols:
             channels_df = self._compute_conversion_factors(self.spark, query, channels_df)
