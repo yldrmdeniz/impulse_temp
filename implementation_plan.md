@@ -81,10 +81,10 @@ F.col("_tgt_factor") / F.col("_src_factor")
 
 **Reasoning**: Factors in the unit_conversion table are relative to the base unit (where `is_base=True`, `factor=1`). To convert source→target: multiply by `target_factor / source_factor`.
 
-#### 2c. Case 6 exclusion in `solve()` method (before `_compute_conversion_factors`):
+#### 2c. Target-without-source-unit exclusion in `solve()` method (before `_compute_conversion_factors`):
 ```python
-case6_mask = F.col(source_unit_col).isNull() & F.col(target_unit_col).isNotNull()
-skipped_df = channels_df.where(case6_mask).select(
+target_without_source_unit_mask = F.col(source_unit_col).isNull() & F.col(target_unit_col).isNotNull()
+skipped_df = channels_df.where(target_without_source_unit_mask).select(
     self.config.container_id_col,
     self.config.channel_id_col,
     target_unit_col,
@@ -92,7 +92,7 @@ skipped_df = channels_df.where(case6_mask).select(
 skipped_count = skipped_df.count()
 if skipped_count > 0:
     self.skipped_channels_df = skipped_df
-channels_df = channels_df.where(~case6_mask)
+channels_df = channels_df.where(~target_without_source_unit_mask)
 ```
 
 #### 2d. Effective unit computation (after `_compute_conversion_factors`, before dropping unit cols):
