@@ -579,7 +579,6 @@ def test_stats_aggregator_get_selectors_with_event():
     assert sel in result
     assert evt in result
 
-
 def test_stats_aggregator_validates_unsupported_statistics():
     """StatsAggregator raises ValueError for unsupported statistic types."""
     import pytest
@@ -600,3 +599,88 @@ def test_stats_aggregator_accepts_all_supported_statistics():
         statistics=["min", "max", "mean", "median", "start", "end"],
     )
     assert agg.statistics == ["min", "max", "mean", "median", "start", "end"]
+
+def test_calculate_aggregations_diff_start_end_basic():
+    """Test that diff_start_end computes last value minus first value."""
+    sample_series = SampleSeries(
+        tstarts=np.array([0.0, 1.0, 2.0]),
+        tends=np.array([1.0, 2.0, 3.0]),
+        values=np.array([10.0, 20.0, 30.0]),
+    )
+
+    aggregator = _create_aggregator(["diff_start_end"])
+    result_dict = aggregator._calculate_aggregations(sample_series, 0.0, 3.0)
+
+    assert result_dict["diff_start_end"] == 20.0  # 30 - 10
+
+
+def test_calculate_aggregations_diff_start_end_negative_result():
+    """Test diff_start_end when last value is less than first value."""
+    sample_series = SampleSeries(
+        tstarts=np.array([0.0, 1.0, 2.0]),
+        tends=np.array([1.0, 2.0, 3.0]),
+        values=np.array([50.0, 20.0, 10.0]),
+    )
+
+    aggregator = _create_aggregator(["diff_start_end"])
+    result_dict = aggregator._calculate_aggregations(sample_series, 0.0, 3.0)
+
+    assert result_dict["diff_start_end"] == -40.0  # 10 - 50
+
+
+def test_calculate_aggregations_diff_start_end_single_sample():
+    """Test diff_start_end with a single sample (should be zero)."""
+    sample_series = SampleSeries(
+        tstarts=np.array([1.0]),
+        tends=np.array([2.0]),
+        values=np.array([42.0]),
+    )
+
+    aggregator = _create_aggregator(["diff_start_end"])
+    result_dict = aggregator._calculate_aggregations(sample_series, 1.0, 2.0)
+
+    assert result_dict["diff_start_end"] == 0.0  # 42 - 42
+
+
+def test_calculate_aggregations_diff_start_end_identical_values():
+    """Test diff_start_end when all values are the same."""
+    sample_series = SampleSeries(
+        tstarts=np.array([0.0, 1.0, 2.0, 3.0]),
+        tends=np.array([1.0, 2.0, 3.0, 4.0]),
+        values=np.array([7.5, 7.5, 7.5, 7.5]),
+    )
+
+    aggregator = _create_aggregator(["diff_start_end"])
+    result_dict = aggregator._calculate_aggregations(sample_series, 0.0, 4.0)
+
+    assert result_dict["diff_start_end"] == 0.0
+
+
+def test_calculate_aggregations_diff_start_end_with_other_stats():
+    """Test diff_start_end alongside other statistics."""
+    sample_series = SampleSeries(
+        tstarts=np.array([0.0, 1.0, 2.0]),
+        tends=np.array([1.0, 2.0, 3.0]),
+        values=np.array([5.0, 15.0, 25.0]),
+    )
+
+    aggregator = _create_aggregator(["start", "end", "diff_start_end"])
+    result_dict = aggregator._calculate_aggregations(sample_series, 0.0, 3.0)
+
+    assert result_dict["start"] == 5.0
+    assert result_dict["end"] == 25.0
+    assert result_dict["diff_start_end"] == 20.0  # 25 - 5
+
+
+def test_calculate_aggregations_diff_start_end_all_nan():
+    """Test diff_start_end returns NaN when all values are NaN."""
+    sample_series = SampleSeries(
+        tstarts=np.array([0.0, 1.0]),
+        tends=np.array([1.0, 2.0]),
+        values=np.array([np.nan, np.nan]),
+    )
+
+    aggregator = _create_aggregator(["diff_start_end"])
+    result_dict = aggregator._calculate_aggregations(sample_series, 0.0, 2.0)
+
+    assert np.isnan(result_dict["diff_start_end"])
