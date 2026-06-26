@@ -757,9 +757,9 @@ class TestCase6Exclusion:
             assert solver.skipped_channels_df.count() > 0
         finally:
             key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm
-            key_value_store_unit_conversion_db.config.debug_tables[
-                "channel_metrics"
-            ] = original_cm_metrics
+            key_value_store_unit_conversion_db.config.debug_tables["channel_metrics"] = (
+                original_cm_metrics
+            )
 
     def test_case6_skipped_channels_tracked(
         self,
@@ -806,9 +806,9 @@ class TestCase6Exclusion:
             assert all(row.target_unit is not None for row in skipped_rows)
         finally:
             key_value_store_unit_conversion_db.config.debug_tables["channel_mapping"] = cm
-            key_value_store_unit_conversion_db.config.debug_tables[
-                "channel_metrics"
-            ] = original_cm_metrics
+            key_value_store_unit_conversion_db.config.debug_tables["channel_metrics"] = (
+                original_cm_metrics
+            )
 
 
 class TestEffectiveUnitComputation:
