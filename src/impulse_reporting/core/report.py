@@ -4,6 +4,7 @@ from functools import reduce
 from typing import Any
 from databricks.sdk import WorkspaceClient
 from pyspark.sql import DataFrame, SparkSession
+import pyspark.sql.functions as F
 from pyspark.sql.types import StructType
 
 from impulse_query_engine.analyze.metadata.time_series_expression import (
@@ -100,6 +101,7 @@ class Report:
         self.aggregation_metadata_dfs = {}
         self.container_dimension_df = None
         self.channel_mapping_resolution_dimension_df = None
+        self.skipped_channels_df = None
         self._is_incremental = None
 
         if config:
@@ -513,7 +515,7 @@ class Report:
             self._persist_incremental(changed_aggregation_ids, changed_event_ids)
         else:
             self._persist_full()
-            
+
         # Clean up temp tables from previous runs
         self._cleanup_temp_tables()
 
@@ -1024,6 +1026,9 @@ class Report:
         self.aggregation_dfs = aggregation_dfs
         self.aggregation_metadata_dfs = aggregation_metadata_dfs
 
+        # Collect skipped channels from solver (Case 6)
+        self.skipped_channels_df = getattr(self.solver, "skipped_channels_df", None)
+
         # Determine container dimension
         self.container_dimension_df = ContainerDimension.get_dimension(
             spark=self.spark,
@@ -1031,6 +1036,7 @@ class Report:
             solver=self.solver,
             config=self.config,
             pre_filtered_containers_df=pre_filtered_containers_df,
+            skipped_channels_df=self.skipped_channels_df,
         )
 
         # Determine channel mapping resolution dimension.
@@ -1055,6 +1061,9 @@ class Report:
                 pre_filtered_containers_df=pre_filtered_containers_df,
             )
         )
+
+        # Enrich fact DataFrames with the effective unit column
+        self._enrich_facts_with_unit()
 
     def _resolve_is_incremental(self, is_incremental: bool = None) -> bool:
         """
@@ -1156,3 +1165,122 @@ class Report:
             silver_last_modified_col=silver_col,
             gold_last_modified_col=gold_col,
         )
+
+    def _enrich_facts_with_unit(self) -> None:
+        """
+        Enrich fact DataFrames with the effective unit from the solver.
+
+        Iterates over pages and aggregations, builds selector_id → unit
+        mappings from ``self.solver.channel_units``, then overwrites the
+        placeholder ``unit`` column in ``self.aggregation_dfs[...]``.
+        """
+        channel_units = getattr(self.solver, "channel_units", {})
+        if not channel_units:
+            return
+
+        aggs_by_type = self._group_aggregations_by_type()
+
+        for agg_type_name, agg_list in aggs_by_type.items():
+            if not agg_list:
+                continue
+
+            agg_type = AggregationType[agg_type_name]
+
+            if agg_type == AggregationType.STATS_AGGREGATOR:
+                self._apply_unit_by_channel_name(agg_type_name, agg_list, channel_units)
+            else:
+                self._apply_unit_by_visual_id(agg_type_name, agg_list, channel_units)
+
+    def _apply_unit_by_channel_name(
+        self,
+        agg_type_name: str,
+        aggregations: list,
+        channel_units: dict[int, str | None],
+    ) -> None:
+        """
+        Apply unit enrichment to StatsAggregator facts by channel_name.
+
+        Maps channel_name → unit using the input_expressions' selectors.
+        """
+        # Build channel_name → unit mapping
+        channel_name_to_unit: dict[str, str | None] = {}
+        for agg in aggregations:
+            for expr, ch_name in zip(agg.input_expressions, agg.channel_names):
+                selectors = expr.get_selectors()
+                for sel in selectors:
+                    unit = channel_units.get(sel.selector_id)
+                    if unit is not None:
+                        channel_name_to_unit[ch_name] = unit
+                        break
+
+        if not channel_name_to_unit:
+            return
+
+        # Build when expression for unit column
+        unit_expr = None
+        for ch_name, unit in channel_name_to_unit.items():
+            if unit_expr is None:
+                unit_expr = F.when(F.col("channel_name") == F.lit(ch_name), F.lit(unit))
+            else:
+                unit_expr = unit_expr.when(F.col("channel_name") == F.lit(ch_name), F.lit(unit))
+        unit_expr = unit_expr.otherwise(F.lit(None).cast("string"))
+
+        if agg_type_name not in self.aggregation_dfs:
+            return
+
+        agg_data = self.aggregation_dfs[agg_type_name]
+        if isinstance(agg_data, dict):
+            if agg_data.get("changed") is not None:
+                agg_data["changed"] = agg_data["changed"].withColumn("unit", unit_expr)
+            if agg_data.get("unchanged") is not None:
+                agg_data["unchanged"] = agg_data["unchanged"].withColumn("unit", unit_expr)
+        else:
+            self.aggregation_dfs[agg_type_name] = agg_data.withColumn("unit", unit_expr)
+
+    def _apply_unit_by_visual_id(
+        self,
+        agg_type_name: str,
+        aggregations: list,
+        channel_units: dict[int, str | None],
+    ) -> None:
+        """
+        Apply unit enrichment to Histogram/Histogram2D facts by visual_id.
+
+        Maps visual_id → unit using the base_expr's selectors.
+        """
+        # Build visual_id → unit mapping
+        visual_id_to_unit: dict[int, str | None] = {}
+        for agg in aggregations:
+            base_expr = agg.base_expr if hasattr(agg, "base_expr") else None
+            if base_expr is None:
+                continue
+            selectors = base_expr.get_selectors()
+            for sel in selectors:
+                unit = channel_units.get(sel.selector_id)
+                if unit is not None:
+                    visual_id_to_unit[agg.get_id()] = unit
+                    break
+
+        if not visual_id_to_unit:
+            return
+
+        # Build when expression for unit column
+        unit_expr = None
+        for vid, unit in visual_id_to_unit.items():
+            if unit_expr is None:
+                unit_expr = F.when(F.col("visual_id") == F.lit(vid), F.lit(unit))
+            else:
+                unit_expr = unit_expr.when(F.col("visual_id") == F.lit(vid), F.lit(unit))
+        unit_expr = unit_expr.otherwise(F.lit(None).cast("string"))
+
+        if agg_type_name not in self.aggregation_dfs:
+            return
+
+        agg_data = self.aggregation_dfs[agg_type_name]
+        if isinstance(agg_data, dict):
+            if agg_data.get("changed") is not None:
+                agg_data["changed"] = agg_data["changed"].withColumn("unit", unit_expr)
+            if agg_data.get("unchanged") is not None:
+                agg_data["unchanged"] = agg_data["unchanged"].withColumn("unit", unit_expr)
+        else:
+            self.aggregation_dfs[agg_type_name] = agg_data.withColumn("unit", unit_expr)

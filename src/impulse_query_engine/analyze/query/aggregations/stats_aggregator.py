@@ -56,6 +56,15 @@ class StatsAggregator(Aggregation):
         self.event_expression = event_expression
         self.statistics = statistics
 
+        # Validate statistics
+        supported = NUMERIC_STATISTICS | set(STRING_STATISTICS) | {"start", "end"}
+        invalid = [s for s in statistics if s not in supported]
+        if invalid:
+            raise ValueError(
+                f"Unsupported statistic type(s): {invalid}. "
+                f"Available options are: {sorted(supported)}."
+            )
+
         # Separate numeric and string statistics for processing
         self._numeric_stats = [
             s

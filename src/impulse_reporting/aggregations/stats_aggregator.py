@@ -254,6 +254,7 @@ class StatsAggregator(Aggregation):
             .transform(StatsAggregator._add_channel_name_column(aggregations))
             .transform(StatsAggregator._add_event_instance_id_column)
             .transform(StatsAggregator._add_visual_id_column(aggregations))
+            .withColumn("unit", f.lit(None).cast(StringType()))
             .select(STATS_AGGREGATOR_FACT_SCHEMA.fieldNames())
         )
         return df
