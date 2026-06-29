@@ -515,7 +515,7 @@ class Report:
             self._persist_incremental(changed_aggregation_ids, changed_event_ids)
         else:
             self._persist_full()
-            
+
         # Clean up temp tables from previous runs
         self._cleanup_temp_tables()
 
@@ -596,10 +596,9 @@ class Report:
 
         # persist measurement dimensions
         if self.container_dimension_df:
-            dim_df = self._enrich_dimension_with_skipped_channels(self.container_dimension_df)
             writer = storage_factory.create_container_dimension_writer()
             uri = writer.get_output_uri()
-            writer.write(dim_df, uri=uri)
+            writer.write(self.container_dimension_df, uri=uri)
 
         # persist channel mapping resolution dimension
         if self.channel_mapping_resolution_dimension_df is not None:
@@ -748,11 +747,10 @@ class Report:
 
         # Persist measurement dimension (upsert by container_id)
         if self.container_dimension_df:
-            dim_df = self._enrich_dimension_with_skipped_channels(self.container_dimension_df)
             writer = storage_factory.create_container_dimension_writer()
             uri = writer.get_output_uri()
             # Add meta information and upsert directly (no schema transform needed)
-            df_enriched = dim_df.transform(transformer.add_meta_information)
+            df_enriched = self.container_dimension_df.transform(transformer.add_meta_information)
             self.sink.upsert(df_enriched, uri, ["container_id"])
 
         # Persist channel mapping resolution dimension
@@ -1028,6 +1026,9 @@ class Report:
         self.aggregation_dfs = aggregation_dfs
         self.aggregation_metadata_dfs = aggregation_metadata_dfs
 
+        # Collect skipped channels from solver (Case 6)
+        self.skipped_channels_df = getattr(self.solver, "skipped_channels_df", None)
+
         # Determine container dimension
         self.container_dimension_df = ContainerDimension.get_dimension(
             spark=self.spark,
@@ -1035,6 +1036,7 @@ class Report:
             solver=self.solver,
             config=self.config,
             pre_filtered_containers_df=pre_filtered_containers_df,
+            skipped_channels_df=self.skipped_channels_df,
         )
 
         # Determine channel mapping resolution dimension.
@@ -1059,9 +1061,6 @@ class Report:
                 pre_filtered_containers_df=pre_filtered_containers_df,
             )
         )
-
-        # Collect skipped channels from solver (Case 6)
-        self.skipped_channels_df = getattr(self.solver, "skipped_channels_df", None)
 
         # Enrich fact DataFrames with the effective unit column
         self._enrich_facts_with_unit()
@@ -1166,54 +1165,6 @@ class Report:
             silver_last_modified_col=silver_col,
             gold_last_modified_col=gold_col,
         )
-
-    def _enrich_dimension_with_skipped_channels(self, dimension_df: DataFrame) -> DataFrame:
-        """
-        Add a ``skipped_channels`` column (JSON string) to the dimension DataFrame.
-
-        Joins the solver's excluded channels info (Case 6) and aggregates
-        per container into a JSON array string.
-
-        Parameters
-        ----------
-        dimension_df : DataFrame
-            The container dimension DataFrame.
-
-        Returns
-        -------
-        DataFrame
-            The dimension DataFrame with a ``skipped_channels`` column added.
-        """
-        import pyspark.sql.functions as _F
-
-        if self.skipped_channels_df is None:
-            return dimension_df.withColumn("skipped_channels", _F.lit(None).cast("string"))
-
-        container_id_col = self.solver.config.container_id_col
-        channel_id_col = self.solver.config.channel_id_col
-        target_unit_col = self.solver.config.target_unit_col
-
-        skipped_agg = self.skipped_channels_df.groupBy(container_id_col).agg(
-            _F.to_json(
-                _F.collect_list(
-                    _F.struct(
-                        _F.col(channel_id_col).alias("channel_id"),
-                        _F.col(target_unit_col).alias("target_unit"),
-                    )
-                )
-            ).alias("skipped_channels")
-        )
-
-        dimension_df = dimension_df.join(
-            _F.broadcast(skipped_agg),
-            on=container_id_col,
-            how="left",
-        )
-
-        if "skipped_channels" not in dimension_df.columns:
-            dimension_df = dimension_df.withColumn("skipped_channels", _F.lit(None).cast("string"))
-
-        return dimension_df
 
     def _enrich_facts_with_unit(self) -> None:
         """

@@ -122,5 +122,11 @@ def test_container_dimensions_default_col_order(spark):
         spark, my_report.query, my_report.solver, my_report.config
     )
 
-    # Default list + the always-added config_hash column.
-    assert dimensions_df.columns == ["container_id", "start_ts", "stop_ts", "config_hash"]
+    # Default list + the always-added config_hash and skipped_channels columns.
+    assert dimensions_df.columns == [
+        "container_id",
+        "start_ts",
+        "stop_ts",
+        "config_hash",
+        "skipped_channels",
+    ]

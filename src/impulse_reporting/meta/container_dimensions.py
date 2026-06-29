@@ -21,6 +21,7 @@ class ContainerDimension:
         solver: QuerySolver,
         config: ImpulseConfig,
         pre_filtered_containers_df: DataFrame = None,
+        skipped_channels_df: DataFrame = None,
     ) -> DataFrame:
         """
         Retrieves the configured measurement dimensions for the matching set
@@ -48,6 +49,10 @@ class ContainerDimension:
             The configuration object containing the report configuration.
         pre_filtered_containers_df : DataFrame, optional
             Pre-filtered containers for incremental processing.
+        skipped_channels_df : DataFrame, optional
+            DataFrame with channels excluded by the solver (Case 6).
+            When provided, a ``skipped_channels`` JSON column is included
+            in the result.
 
         Returns
         -------
@@ -81,8 +86,12 @@ class ContainerDimension:
                 "internal name here."
             )
 
-        return df.select(*measurement_dimensions).transform(
+        result = df.select(*measurement_dimensions).transform(
             ContainerDimension._add_config_hash(config)
+        )
+
+        return result.transform(
+            ContainerDimension._add_skipped_channels(solver, skipped_channels_df)
         )
 
     @staticmethod
@@ -103,6 +112,53 @@ class ContainerDimension:
         def _(df: DataFrame) -> DataFrame:
             config_hash = config.model_dump_json().encode("utf-8")
             return df.withColumn("config_hash", F.hash(F.lit(config_hash)))
+
+        return _
+
+    @staticmethod
+    def _add_skipped_channels(
+        solver: QuerySolver, skipped_channels_df: "DataFrame | None"
+    ) -> Callable[..., "DataFrame"]:
+        """
+        Return a transform that joins aggregated skipped-channel info per container.
+
+        Parameters
+        ----------
+        solver : QuerySolver
+            Solver instance (provides column-name config).
+        skipped_channels_df : DataFrame or None
+            DataFrame with per-channel skip info, or None.
+
+        Returns
+        -------
+        Callable[..., DataFrame]
+            A DataFrame transform that adds a ``skipped_channels`` column.
+        """
+
+        def _(df: DataFrame) -> DataFrame:
+            if skipped_channels_df is None:
+                return df.withColumn("skipped_channels", F.lit(None).cast("string"))
+
+            container_id_col = solver.config.container_id_col
+            channel_id_col = solver.config.channel_id_col
+            target_unit_col = solver.config.target_unit_col
+
+            skipped_agg = skipped_channels_df.groupBy(container_id_col).agg(
+                F.to_json(
+                    F.collect_list(
+                        F.struct(
+                            F.col(channel_id_col).alias("channel_id"),
+                            F.col(target_unit_col).alias("target_unit"),
+                        )
+                    )
+                ).alias("skipped_channels")
+            )
+
+            return df.join(
+                F.broadcast(skipped_agg),
+                on=container_id_col,
+                how="left",
+            )
 
         return _
 
