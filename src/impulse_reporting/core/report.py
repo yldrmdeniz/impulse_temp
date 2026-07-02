@@ -491,6 +491,29 @@ class Report:
             )
             raise ValueError(error_message)
 
+    def run(self, is_incremental: bool = None):
+        """
+        Determine and persist the report in one operation, ensuring temp tables are cleaned up.
+
+        Combines determine_report() and persist_results() under a single try/finally
+        so that temporary Delta tables are always deleted after results are generated
+        and persisted.
+
+        Parameters
+        ----------
+        is_incremental : bool, optional
+            Hint for processing mode. See determine_report() for details.
+
+        Returns
+        -------
+        None
+        """
+        try:
+            self.determine_report(is_incremental=is_incremental)
+            self.persist_results()
+        finally:
+            self._cleanup_temp_tables()
+
     @telemetry_logger("report", "persist_results")
     def persist_results(self):
         """
