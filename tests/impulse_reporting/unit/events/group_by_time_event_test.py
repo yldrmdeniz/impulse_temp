@@ -273,52 +273,309 @@ class TestDetermineMetadataDf:
 
 
 # ===========================================================================
-# determine_events with qualified column names (regression test)
+# Timestamp correctness after determine_events (integration)
 # ===========================================================================
-class TestDetermineEventsQualifiedColumns:
-    """Regression tests for DataFrames with fully-qualified column names.
+class TestTimestampCorrectness:
+    """Tests that start_ts and end_ts values are correct after slicing."""
 
-    In real Databricks environments, Spark can return DataFrames whose columns
-    are qualified like `catalog.schema.table.col`. withColumnRenamed fails
-    silently on such names, so we use withColumn + f.col() instead.
-    """
-
-    def test_qualified_stop_ts_col(self, spark, basic_narrow_db):
-        """determine_events should work when solver.config.stop_ts_col is qualified."""
-        from unittest.mock import MagicMock, patch
-
-        event = GroupByTimeEvent(name="qualified_test", group_by_time="10m")
+    def test_first_slice_start_matches_container_start(self, spark, basic_narrow_db):
+        """The first slice's start_ts must equal the container's original start_ts."""
+        event = GroupByTimeEvent(name="ts_check", group_by_time="10m")
         solver = KeyValueStoreSolver(spark)
 
-        # Get a real container_metrics DataFrame from the solver
+        # Get the original container start timestamps
         container_tags_df = solver.filter_container_tags(spark, basic_narrow_db.query)
-        real_metrics_df = solver.filter_container_metrics(
+        container_metrics_df = solver.filter_container_metrics(
             spark, basic_narrow_db.query, container_tags_df, None
         )
+        original_starts = {
+            row.container_id: row.start_ts
+            for row in container_metrics_df.select("container_id", "start_ts").collect()
+        }
 
-        # Rename columns to simulate fully-qualified names (catalog.schema.table.col)
-        qualified_start = "development.silver.container_metric.start_ts"
-        qualified_stop = "development.silver.container_metric.end_ts"
-        qualified_df = real_metrics_df.withColumnRenamed(
-            "start_ts", qualified_start
-        ).withColumnRenamed("stop_ts", qualified_stop)
+        # Get the event slices
+        df = GroupByTimeEvent.determine_events(
+            spark,
+            [event],
+            query=basic_narrow_db.query,
+            solver=solver,
+        )
 
-        # Mock solver to return the qualified DataFrame and config
-        mock_solver = MagicMock()
-        mock_solver.filter_container_tags.return_value = container_tags_df
-        mock_solver.filter_container_metrics.return_value = qualified_df
-        mock_solver.config.start_ts_col = qualified_start
-        mock_solver.config.stop_ts_col = qualified_stop
-        mock_solver.config.container_id_col = solver.config.container_id_col
+        # For each container, the minimum start_ts should equal the original
+        min_starts = {
+            row.container_id: row.min_start
+            for row in df.groupBy("container_id")
+            .agg(f.min("start_ts").alias("min_start"))
+            .collect()
+        }
+
+        for cid, original_start in original_starts.items():
+            assert min_starts[cid] == original_start, (
+                f"Container {cid}: first slice start_ts {min_starts[cid]} "
+                f"!= container start_ts {original_start}"
+            )
+
+    def test_last_slice_end_matches_container_stop(self, spark, basic_narrow_db):
+        """The last slice's end_ts must equal the container's original stop_ts."""
+        event = GroupByTimeEvent(name="ts_check", group_by_time="10m")
+        solver = KeyValueStoreSolver(spark)
+
+        container_tags_df = solver.filter_container_tags(spark, basic_narrow_db.query)
+        container_metrics_df = solver.filter_container_metrics(
+            spark, basic_narrow_db.query, container_tags_df, None
+        )
+        original_stops = {
+            row.container_id: row.stop_ts
+            for row in container_metrics_df.select("container_id", "stop_ts").collect()
+        }
 
         df = GroupByTimeEvent.determine_events(
             spark,
             [event],
             query=basic_narrow_db.query,
-            solver=mock_solver,
+            solver=solver,
         )
 
-        assert df is not None
-        assert "start_ts" in df.columns
-        assert "end_ts" in df.columns
-        assert df.count() > 0
+        max_ends = {
+            row.container_id: row.max_end
+            for row in df.groupBy("container_id").agg(f.max("end_ts").alias("max_end")).collect()
+        }
+
+        for cid, original_stop in original_stops.items():
+            assert max_ends[cid] == original_stop, (
+                f"Container {cid}: last slice end_ts {max_ends[cid]} "
+                f"!= container stop_ts {original_stop}"
+            )
+
+    def test_slices_are_contiguous(self, spark, basic_narrow_db):
+        """Each slice's start_ts must equal the previous slice's end_ts (no gaps)."""
+        event = GroupByTimeEvent(name="contiguous_check", group_by_time="10m")
+        solver = KeyValueStoreSolver(spark)
+
+        df = GroupByTimeEvent.determine_events(
+            spark,
+            [event],
+            query=basic_narrow_db.query,
+            solver=solver,
+        )
+
+        from pyspark.sql.window import Window
+
+        w = Window.partitionBy("container_id").orderBy("start_ts")
+        df_with_prev = df.withColumn("prev_end_ts", f.lag("end_ts").over(w))
+
+        # Filter to rows that have a previous slice (skip first slice per container)
+        gaps = df_with_prev.filter(
+            (f.col("prev_end_ts").isNotNull()) & (f.col("start_ts") != f.col("prev_end_ts"))
+        )
+        assert gaps.count() == 0, f"Found {gaps.count()} gaps between slices"
+
+    def test_no_slice_exceeds_group_by_duration(self, spark, basic_narrow_db):
+        """No slice duration should exceed the configured group_by_ms."""
+        group_by_time = "10m"
+        group_by_ms = 600_000
+        event = GroupByTimeEvent(name="duration_check", group_by_time=group_by_time)
+        solver = KeyValueStoreSolver(spark)
+
+        df = GroupByTimeEvent.determine_events(
+            spark,
+            [event],
+            query=basic_narrow_db.query,
+            solver=solver,
+        )
+
+        violations = df.filter((f.col("end_ts") - f.col("start_ts")) > group_by_ms)
+        assert (
+            violations.count() == 0
+        ), f"Found {violations.count()} slices exceeding {group_by_time}"
+
+    def test_all_slices_have_positive_duration(self, spark, basic_narrow_db):
+        """Every slice must have end_ts > start_ts."""
+        event = GroupByTimeEvent(name="positive_dur", group_by_time="10m")
+        solver = KeyValueStoreSolver(spark)
+
+        df = GroupByTimeEvent.determine_events(
+            spark,
+            [event],
+            query=basic_narrow_db.query,
+            solver=solver,
+        )
+
+        invalid = df.filter(f.col("end_ts") <= f.col("start_ts"))
+        assert invalid.count() == 0, f"Found {invalid.count()} slices with end_ts <= start_ts"
+
+    def test_start_ts_and_end_ts_are_long_type(self, spark, basic_narrow_db):
+        """start_ts and end_ts must be LongType (epoch milliseconds)."""
+        from pyspark.sql.types import LongType
+
+        event = GroupByTimeEvent(name="type_check", group_by_time="10m")
+        solver = KeyValueStoreSolver(spark)
+
+        df = GroupByTimeEvent.determine_events(
+            spark,
+            [event],
+            query=basic_narrow_db.query,
+            solver=solver,
+        )
+
+        schema_fields = {field.name: field.dataType for field in df.schema.fields}
+        assert isinstance(schema_fields["start_ts"], LongType)
+        assert isinstance(schema_fields["end_ts"], LongType)
+
+
+# ===========================================================================
+# End-to-end Report integration (determine_report)
+# ===========================================================================
+class TestGroupByTimeEventInReport:
+    """Integration test: GroupByTimeEvent through a full Report.determine_report cycle."""
+
+    def test_report_determine_produces_valid_timestamps(self, spark, basic_narrow_db):
+        """Running determine_report with a GroupByTimeEvent yields correct start_ts/end_ts."""
+        from unittest.mock import create_autospec, patch
+
+        from databricks.sdk import WorkspaceClient
+
+        from impulse_reporting.core.report import Report
+        from impulse_reporting.events.group_by_time_event import GroupByTimeEvent
+
+        config = {
+            "source": {
+                "container_metrics_table": "spark_catalog.silver.container_metrics",
+                "channel_metrics_table": "spark_catalog.silver.channel_metrics",
+                "channels_uri": "spark_catalog.silver.channels",
+            },
+            "query_engine": {"solver": "KeyValueStoreSolver"},
+        }
+
+        with (
+            patch.object(Report, "create_measurement_db", return_value=basic_narrow_db),
+            patch.object(Report, "create_query_builder", return_value=basic_narrow_db.query),
+            patch.object(Report, "create_solver", return_value=KeyValueStoreSolver(spark)),
+            patch.object(Report, "create_sink", return_value=None),
+        ):
+            report = Report(
+                name="test_groupby_report",
+                spark=spark,
+                workspace_client=create_autospec(WorkspaceClient),
+                config=config,
+            )
+
+        event = GroupByTimeEvent(name="1min_slices", group_by_time="1m")
+        report.add_event(event)
+        report.determine_report()
+
+        # Get the event fact DataFrame from report
+        event_dfs = report.event_dfs
+        assert "GROUP_BY_TIME_EVENT" in event_dfs
+
+        changed_df = event_dfs["GROUP_BY_TIME_EVENT"]["changed"]
+        assert changed_df is not None
+
+        # Expected slices with 1m (60000ms) duration:
+        # cid=1: start=1751528502708, stop=1751528610253, dur=107545ms → 2 slices
+        # cid=2: start=1751528501483, stop=1751528610235, dur=108752ms → 2 slices
+        # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
+        expected_slices = {
+            1: [
+                (1751528502708, 1751528562708),
+                (1751528562708, 1751528610253),
+            ],
+            2: [
+                (1751528501483, 1751528561483),
+                (1751528561483, 1751528610235),
+            ],
+            3: [
+                (1751528500169, 1751528560169),
+                (1751528560169, 1751528610252),
+            ],
+        }
+
+        assert changed_df.count() == 6, f"Expected 6 slices total, got {changed_df.count()}"
+
+        # Verify exact start_ts/end_ts per container
+        rows = changed_df.orderBy("container_id", "start_ts").collect()
+        actual_slices = {}
+        for row in rows:
+            actual_slices.setdefault(row.container_id, []).append((row.start_ts, row.end_ts))
+
+        for cid, expected in expected_slices.items():
+            actual = actual_slices[cid]
+            assert actual == expected, f"Container {cid}: expected {expected}, got {actual}"
+
+    def test_report_produces_exact_slice_count(self, spark, basic_narrow_db):
+        """Verify the exact number of slices matches ceil(duration / group_by_ms) per container."""
+        from unittest.mock import create_autospec, patch
+
+        from databricks.sdk import WorkspaceClient
+
+        from impulse_reporting.core.report import Report
+        from impulse_reporting.events.group_by_time_event import GroupByTimeEvent
+
+        config = {
+            "source": {
+                "container_metrics_table": "spark_catalog.silver.container_metrics",
+                "channel_metrics_table": "spark_catalog.silver.channel_metrics",
+                "channels_uri": "spark_catalog.silver.channels",
+            },
+            "query_engine": {"solver": "KeyValueStoreSolver"},
+        }
+
+        with (
+            patch.object(Report, "create_measurement_db", return_value=basic_narrow_db),
+            patch.object(Report, "create_query_builder", return_value=basic_narrow_db.query),
+            patch.object(Report, "create_solver", return_value=KeyValueStoreSolver(spark)),
+            patch.object(Report, "create_sink", return_value=None),
+        ):
+            report = Report(
+                name="test_slice_count_report",
+                spark=spark,
+                workspace_client=create_autospec(WorkspaceClient),
+                config=config,
+            )
+
+        group_by_time = "1m"
+        group_by_ms = 60_000
+        event = GroupByTimeEvent(name="1min_slices", group_by_time=group_by_time)
+        report.add_event(event)
+        report.determine_report()
+
+        changed_df = report.event_dfs["GROUP_BY_TIME_EVENT"]["changed"]
+
+        # Hardcoded expected slices with 1m (60000ms) duration:
+        # cid=1: start=1751528502708, stop=1751528610253, dur=107545ms → 2 slices
+        # cid=2: start=1751528501483, stop=1751528610235, dur=108752ms → 2 slices
+        # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
+        expected_slices = {
+            1: [
+                (1751528502708, 1751528562708),
+                (1751528562708, 1751528610253),
+            ],
+            2: [
+                (1751528501483, 1751528561483),
+                (1751528561483, 1751528610235),
+            ],
+            3: [
+                (1751528500169, 1751528560169),
+                (1751528560169, 1751528610252),
+            ],
+        }
+        expected_total = 6
+
+        # Assert total slice count
+        actual_total = changed_df.count()
+        assert (
+            actual_total == expected_total
+        ), f"Expected {expected_total} total slices, got {actual_total}"
+
+        # Assert exact start_ts/end_ts per container
+        rows = changed_df.orderBy("container_id", "start_ts").collect()
+        actual_slices = {}
+        for row in rows:
+            actual_slices.setdefault(row.container_id, []).append((row.start_ts, row.end_ts))
+
+        for cid, expected in expected_slices.items():
+            actual = actual_slices[cid]
+            assert len(actual) == len(
+                expected
+            ), f"Container {cid}: expected {len(expected)} slices, got {len(actual)}"
+            assert actual == expected, f"Container {cid}: expected {expected}, got {actual}"
