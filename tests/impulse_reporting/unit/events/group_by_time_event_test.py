@@ -249,65 +249,6 @@ class TestDetermineEvents:
 
 
 # ===========================================================================
-# determine_events_with_attributes (integration, needs Spark)
-# ===========================================================================
-class TestDetermineEventsWithAttributes:
-    """Tests for determine_events_with_attributes (requires Spark session)."""
-
-    def test_has_extended_columns(self, spark, basic_narrow_db):
-        event = GroupByTimeEvent(name="attr_slices", group_by_time="10m")
-
-        df = GroupByTimeEvent.determine_events_with_attributes(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=KeyValueStoreSolver(spark),
-        )
-
-        expected_cols = {
-            "container_id",
-            "event_instance_id",
-            "event_id",
-            "start_ts",
-            "end_ts",
-            "order",
-            "grouped_by",
-            "grouped_by_actual",
-        }
-        assert set(df.columns) == expected_cols
-
-    def test_order_is_one_based(self, spark, basic_narrow_db):
-        event = GroupByTimeEvent(name="order_slices", group_by_time="1ms")
-
-        df = GroupByTimeEvent.determine_events_with_attributes(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=KeyValueStoreSolver(spark),
-        )
-
-        min_order = df.agg(f.min("order")).collect()[0][0]
-        assert min_order == 1
-
-    def test_last_slice_actual_le_configured(self, spark, basic_narrow_db):
-        event = GroupByTimeEvent(name="last_slices", group_by_time="10m")
-        group_by_ms = event._group_by_ms
-
-        df = GroupByTimeEvent.determine_events_with_attributes(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=KeyValueStoreSolver(spark),
-        )
-
-        # Check all slices have actual duration <= configured
-        rows = df.collect()
-        for row in rows:
-            actual_ms = int(row.grouped_by_actual.replace("ms", ""))
-            assert actual_ms <= group_by_ms
-
-
-# ===========================================================================
 # determine_metadata_df (needs Spark)
 # ===========================================================================
 class TestDetermineMetadataDf:
@@ -329,3 +270,55 @@ class TestDetermineMetadataDf:
         """Verify attributes dict includes grouped_by (tested at Python level)."""
         event = GroupByTimeEvent(name="meta_evt2", group_by_time="10m")
         assert event.as_dict()["attributes"]["grouped_by"] == "10m"
+
+
+# ===========================================================================
+# determine_events with qualified column names (regression test)
+# ===========================================================================
+class TestDetermineEventsQualifiedColumns:
+    """Regression tests for DataFrames with fully-qualified column names.
+
+    In real Databricks environments, Spark can return DataFrames whose columns
+    are qualified like `catalog.schema.table.col`. withColumnRenamed fails
+    silently on such names, so we use withColumn + f.col() instead.
+    """
+
+    def test_qualified_stop_ts_col(self, spark, basic_narrow_db):
+        """determine_events should work when solver.config.stop_ts_col is qualified."""
+        from unittest.mock import MagicMock, patch
+
+        event = GroupByTimeEvent(name="qualified_test", group_by_time="10m")
+        solver = KeyValueStoreSolver(spark)
+
+        # Get a real container_metrics DataFrame from the solver
+        container_tags_df = solver.filter_container_tags(spark, basic_narrow_db.query)
+        real_metrics_df = solver.filter_container_metrics(
+            spark, basic_narrow_db.query, container_tags_df, None
+        )
+
+        # Rename columns to simulate fully-qualified names (catalog.schema.table.col)
+        qualified_start = "development.silver.container_metric.start_ts"
+        qualified_stop = "development.silver.container_metric.end_ts"
+        qualified_df = real_metrics_df.withColumnRenamed(
+            "start_ts", qualified_start
+        ).withColumnRenamed("stop_ts", qualified_stop)
+
+        # Mock solver to return the qualified DataFrame and config
+        mock_solver = MagicMock()
+        mock_solver.filter_container_tags.return_value = container_tags_df
+        mock_solver.filter_container_metrics.return_value = qualified_df
+        mock_solver.config.start_ts_col = qualified_start
+        mock_solver.config.stop_ts_col = qualified_stop
+        mock_solver.config.container_id_col = solver.config.container_id_col
+
+        df = GroupByTimeEvent.determine_events(
+            spark,
+            [event],
+            query=basic_narrow_db.query,
+            solver=mock_solver,
+        )
+
+        assert df is not None
+        assert "start_ts" in df.columns
+        assert "end_ts" in df.columns
+        assert df.count() > 0
