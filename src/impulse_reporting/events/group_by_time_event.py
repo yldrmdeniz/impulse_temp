@@ -248,17 +248,21 @@ class GroupByTimeEvent(Event):
             spark, query, container_tags_df, pre_filtered_containers_df
         )
 
-        # Cast timestamps (use withColumn to handle fully-qualified column names)
+        # Cast timestamps — same pattern as ContainerEvent.
+        # withColumnRenamed is a no-op when stop_ts_col doesn't exist
+        # (i.e. column is already "end_ts").
         start_ts_col = solver.config.start_ts_col
         stop_ts_col = solver.config.stop_ts_col
-        df = container_metrics_df.withColumn(
-            "start_ts", f.col(start_ts_col).cast("long")
-        ).withColumn("stop_ts", f.col(stop_ts_col).cast("long"))
+        df = (
+            container_metrics_df.withColumnRenamed(stop_ts_col, "end_ts")
+            .withColumn("start_ts", f.col(start_ts_col).cast("long"))
+            .withColumn("end_ts", f.col("end_ts").cast("long"))
+        )
 
         # Compute number of slices per container
         df = df.withColumn(
             "_num_slices",
-            f.ceil((f.col("stop_ts") - f.col("start_ts")) / f.lit(group_by_ms)).cast("int"),
+            f.ceil((f.col("end_ts") - f.col("start_ts")) / f.lit(group_by_ms)).cast("int"),
         )
 
         # Explode into slice indices
@@ -276,7 +280,7 @@ class GroupByTimeEvent(Event):
             "end_ts",
             f.least(
                 f.col("start_ts") + f.lit(group_by_ms),
-                f.col("stop_ts"),
+                f.col("end_ts"),
             ).cast(LongType()),
         )
 
