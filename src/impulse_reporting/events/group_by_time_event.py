@@ -248,14 +248,12 @@ class GroupByTimeEvent(Event):
             spark, query, container_tags_df, pre_filtered_containers_df
         )
 
-        # Rename and cast timestamps
+        # Cast timestamps (use withColumn to handle fully-qualified column names)
         start_ts_col = solver.config.start_ts_col
         stop_ts_col = solver.config.stop_ts_col
-        df = (
-            container_metrics_df.withColumnRenamed(stop_ts_col, "stop_ts")
-            .withColumn("start_ts", f.col(start_ts_col).cast("long"))
-            .withColumn("stop_ts", f.col("stop_ts").cast("long"))
-        )
+        df = container_metrics_df.withColumn(
+            "start_ts", f.col(start_ts_col).cast("long")
+        ).withColumn("stop_ts", f.col(stop_ts_col).cast("long"))
 
         # Compute number of slices per container
         df = df.withColumn(
@@ -299,120 +297,6 @@ class GroupByTimeEvent(Event):
 
         # Select only the columns defined in the fact schema
         return df.select(EVENT_INSTANCE_FACT_SCHEMA.fieldNames())
-
-    @classmethod
-    def determine_events_with_attributes(
-        cls,
-        spark: SparkSession,
-        events: list[GroupByTimeEvent],
-        *,
-        query: QueryBuilder = None,
-        solver: QuerySolver = None,
-        pre_filtered_containers_df: DataFrame = None,
-    ) -> DataFrame:
-        """Determine event instances with extended attribute columns.
-
-        Returns the same slices as ``determine_events`` but includes
-        additional columns: ``order``, ``grouped_by``, ``grouped_by_actual``.
-
-        Parameters
-        ----------
-        spark : SparkSession
-            Active Spark session.
-        events : list of GroupByTimeEvent
-            List of GroupByTimeEvent objects (only the first is used).
-        query : QueryBuilder, optional
-            Query builder with filters applied.
-        solver : QuerySolver, optional
-            Solver whose filter pipeline is used for container resolution.
-        pre_filtered_containers_df : DataFrame, optional
-            Pre-filtered containers for incremental processing.
-
-        Returns
-        -------
-        DataFrame
-            Spark DataFrame with columns: container_id, event_instance_id,
-            event_id, start_ts, end_ts, order, grouped_by, grouped_by_actual.
-        """
-        event = events[0]
-        group_by_ms = event._group_by_ms
-
-        # Resolve containers via solver filter pipeline
-        container_tags_df = solver.filter_container_tags(spark, query)
-        container_metrics_df = solver.filter_container_metrics(
-            spark, query, container_tags_df, pre_filtered_containers_df
-        )
-
-        # Rename and cast timestamps
-        start_ts_col = solver.config.start_ts_col
-        stop_ts_col = solver.config.stop_ts_col
-        df = (
-            container_metrics_df.withColumnRenamed(stop_ts_col, "stop_ts")
-            .withColumn("start_ts", f.col(start_ts_col).cast("long"))
-            .withColumn("stop_ts", f.col("stop_ts").cast("long"))
-        )
-
-        # Compute number of slices per container
-        df = df.withColumn(
-            "_num_slices",
-            f.ceil((f.col("stop_ts") - f.col("start_ts")) / f.lit(group_by_ms)).cast("int"),
-        )
-
-        # Explode into slice indices
-        df = df.withColumn(
-            "_slice_index",
-            f.explode(f.sequence(f.lit(0), f.col("_num_slices") - 1)),
-        )
-
-        # Compute slice boundaries
-        df = df.withColumn(
-            "start_ts",
-            (f.col("start_ts") + f.col("_slice_index") * f.lit(group_by_ms)).cast(LongType()),
-        )
-        df = df.withColumn(
-            "end_ts",
-            f.least(
-                f.col("start_ts") + f.lit(group_by_ms),
-                f.col("stop_ts"),
-            ).cast(LongType()),
-        )
-
-        # Add event_name for downstream utilities
-        df = df.withColumn("event_name", f.lit(event.get_name()))
-
-        # Generate event_instance_id (uses composite key hash)
-        df = df.withColumn(
-            "event_instance_id",
-            generate_event_instance_id_column(event_type=GroupByTimeEvent),
-        )
-
-        # Add event_id column
-        df = df.withColumn(
-            "event_id",
-            ReportEntityUtil.get_event_id_column(elements=events, element_name="event_name"),
-        )
-
-        # Add extended attribute columns
-        df = df.withColumn("order", (f.col("_slice_index") + 1).cast("int"))
-        df = df.withColumn("grouped_by", f.lit(event.group_by_time))
-        df = df.withColumn(
-            "grouped_by_actual",
-            f.concat(
-                (f.col("end_ts") - f.col("start_ts")).cast("string"),
-                f.lit("ms"),
-            ),
-        )
-
-        return df.select(
-            "container_id",
-            "event_instance_id",
-            "event_id",
-            "start_ts",
-            "end_ts",
-            "order",
-            "grouped_by",
-            "grouped_by_actual",
-        )
 
     @classmethod
     def determine_metadata_df(
