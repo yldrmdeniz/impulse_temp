@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 from pyspark.sql import DataFrame, SparkSession
 
+from impulse_reporting.events.group_by_time_event import GroupByTimeEvent
+
 if TYPE_CHECKING:
     from impulse_query_engine.analyze.metadata.time_series_expression import (
         TimeSeriesExpression,
@@ -239,8 +241,8 @@ def dispatch_events(
             continue
         cls = type_enum[type_name].value
 
-        if issubclass(cls, container_event_cls):
-            # ContainerEvent uses filter pipeline, not solved_df
+        if issubclass(cls, container_event_cls) or issubclass(cls, GroupByTimeEvent):
+            # ContainerEvent and GroupByTimeEvent use filter pipeline, not solved_df
             event_dfs[type_name] = cls.determine_events(
                 spark,
                 events,
