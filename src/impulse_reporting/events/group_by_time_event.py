@@ -251,6 +251,9 @@ class GroupByTimeEvent(Event):
         start_ts_col = solver.config.start_ts_col
         stop_ts_col = solver.config.stop_ts_col
 
+        # stop_ts_col may not exist if column_name_mapping already renamed it
+        _actual_stop_col = stop_ts_col if stop_ts_col in container_metrics_df.columns else "end_ts"
+
         from pyspark.sql.types import TimestampType as _TsType
 
         _src_dtype = container_metrics_df.schema[start_ts_col].dataType
@@ -259,12 +262,12 @@ class GroupByTimeEvent(Event):
                 start_ts_col,
                 (f.col(start_ts_col).cast("double") * 1000).cast("long"),
             ).withColumn(
-                stop_ts_col,
-                (f.col(stop_ts_col).cast("double") * 1000).cast("long"),
+                _actual_stop_col,
+                (f.col(_actual_stop_col).cast("double") * 1000).cast("long"),
             )
 
         df = (
-            container_metrics_df.withColumnRenamed(stop_ts_col, "end_ts")
+            container_metrics_df.withColumnRenamed(_actual_stop_col, "end_ts")
             .withColumn("start_ts", f.col(start_ts_col).cast("long"))
             .withColumn("end_ts", f.col("end_ts").cast("long"))
         )
