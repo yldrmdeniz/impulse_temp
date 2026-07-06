@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 class TimeUnit(Enum):
     """Valid time units for GroupByTimeEvent duration strings."""
 
-    MILLISECONDS = "ms"
     SECONDS = "s"
     MINUTES = "m"
     HOURS = "h"
@@ -37,7 +36,6 @@ class TimeUnit(Enum):
 
 
 _UNIT_TO_MS = {
-    "ms": 1,
     "s": 1_000,
     "m": 60_000,
     "h": 3_600_000,
@@ -53,7 +51,7 @@ def _parse_duration(duration_str: str) -> int:
     Parameters
     ----------
     duration_str : str
-        A string like ``"10m"``, ``"1h"``, ``"500ms"``.
+        A string like ``"10m"``, ``"1h"``, ``"30s"``.
 
     Returns
     -------
@@ -248,11 +246,23 @@ class GroupByTimeEvent(Event):
             spark, query, container_tags_df, pre_filtered_containers_df
         )
 
-        # Cast timestamps — same pattern as ContainerEvent.
-        # withColumnRenamed is a no-op when stop_ts_col doesn't exist
-        # (i.e. column is already "end_ts").
+        # Normalize timestamps to epoch milliseconds (LongType).
+        # If columns are TimestampType, convert to epoch ms first.
         start_ts_col = solver.config.start_ts_col
         stop_ts_col = solver.config.stop_ts_col
+
+        from pyspark.sql.types import TimestampType as _TsType
+
+        _src_dtype = container_metrics_df.schema[start_ts_col].dataType
+        if isinstance(_src_dtype, _TsType):
+            container_metrics_df = container_metrics_df.withColumn(
+                start_ts_col,
+                (f.col(start_ts_col).cast("double") * 1000).cast("long"),
+            ).withColumn(
+                stop_ts_col,
+                (f.col(stop_ts_col).cast("double") * 1000).cast("long"),
+            )
+
         df = (
             container_metrics_df.withColumnRenamed(stop_ts_col, "end_ts")
             .withColumn("start_ts", f.col(start_ts_col).cast("long"))
