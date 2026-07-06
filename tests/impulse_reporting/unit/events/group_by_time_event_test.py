@@ -18,9 +18,6 @@ from tests.conftest import basic_narrow_db, spark
 class TestParseDuration:
     """Tests for the _parse_duration helper function."""
 
-    def test_parse_milliseconds(self):
-        assert _parse_duration("500ms") == 500
-
     def test_parse_seconds(self):
         assert _parse_duration("30s") == 30_000
 
@@ -53,6 +50,10 @@ class TestParseDuration:
     def test_invalid_unit_kg(self):
         with pytest.raises(ValueError, match="Invalid time unit"):
             _parse_duration("5kg")
+
+    def test_invalid_unit_ms(self):
+        with pytest.raises(ValueError, match="Invalid time unit"):
+            _parse_duration("500ms")
 
     def test_time_unit_enum_values(self):
         """All TimeUnit enum values should be parseable."""
@@ -233,7 +234,7 @@ class TestDetermineEvents:
 
     def test_multiple_slices_per_container(self, spark, basic_narrow_db):
         """Using a small slice duration should produce multiple slices."""
-        event = GroupByTimeEvent(name="small_slices", group_by_time="1ms")
+        event = GroupByTimeEvent(name="small_slices", group_by_time="1s")
 
         df = GroupByTimeEvent.determine_events(
             spark,
@@ -242,7 +243,7 @@ class TestDetermineEvents:
             solver=KeyValueStoreSolver(spark),
         )
 
-        # With 1ms slices, we should get more rows than containers
+        # With 1s (1000ms) slices, we should get more rows than containers
         container_count = df.select("container_id").distinct().count()
         total_slices = df.count()
         assert total_slices > container_count
@@ -471,7 +472,7 @@ class TestGroupByTimeEventInReport:
         changed_df = event_dfs["GROUP_BY_TIME_EVENT"]["changed"]
         assert changed_df is not None
 
-        # Expected slices with 1m (60000ms) duration:
+        # Expected slices with 1m (60s) duration:
         # cid=1: start=1751528502708, stop=1751528610253, dur=107545ms → 2 slices
         # cid=2: start=1751528501483, stop=1751528610235, dur=108752ms → 2 slices
         # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
