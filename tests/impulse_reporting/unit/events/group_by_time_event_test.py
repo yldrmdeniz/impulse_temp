@@ -138,9 +138,7 @@ class TestGetExpression:
 
     def test_expression_slice_width_in_channel_unit(self):
         # 10m == 600_000 ms; in microseconds that is 600_000 * 1_000.
-        event = GroupByTimeEvent(
-            name="expr", group_by_time="10m", channel_time_unit="us"
-        )
+        event = GroupByTimeEvent(name="expr", group_by_time="10m", channel_time_unit="us")
         assert event.get_expression().slice_width == 600_000 * 1_000
 
     def test_expression_gap_in_channel_unit(self):
@@ -300,9 +298,7 @@ class TestDetermineEvents:
             event_b.get_expression(),
         ).solve(spark, solver)
 
-        df = GroupByTimeEvent.determine_events(
-            spark, [event_a, event_b], solved_df=solved_df
-        )
+        df = GroupByTimeEvent.determine_events(spark, [event_a, event_b], solved_df=solved_df)
 
         ids_a = {
             row.event_instance_id
@@ -318,7 +314,6 @@ class TestDetermineEvents:
         }
         assert ids_a and ids_b
         assert ids_a.isdisjoint(ids_b)
-
 
 
 # ===========================================================================
@@ -432,9 +427,9 @@ class TestTimestampCorrectness:
             (f.col("prev_end_ts").isNotNull())
             & ((f.col("start_ts") - f.col("prev_end_ts")) != f.lit(expected_gap))
         )
-        assert bad_gaps.count() == 0, (
-            f"Found {bad_gaps.count()} slice boundaries not separated by {expected_gap}"
-        )
+        assert (
+            bad_gaps.count() == 0
+        ), f"Found {bad_gaps.count()} slice boundaries not separated by {expected_gap}"
 
     def test_no_slice_exceeds_group_by_duration(self, spark, basic_narrow_db):
         """No slice duration should exceed the configured slice width (channel unit)."""
@@ -471,7 +466,6 @@ class TestTimestampCorrectness:
         schema_fields = {field.name: field.dataType for field in df.schema.fields}
         assert isinstance(schema_fields["start_ts"], LongType)
         assert isinstance(schema_fields["end_ts"], LongType)
-
 
 
 # ===========================================================================
@@ -595,4 +589,3 @@ class TestGroupByTimeEventInReport:
             "every aggregation event_instance_id must correspond to an event "
             f"event_instance_id (matched {matched} of {n_stats_ids})"
         )
-

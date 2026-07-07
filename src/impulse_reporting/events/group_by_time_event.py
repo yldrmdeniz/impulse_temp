@@ -151,9 +151,7 @@ class GroupByTimeEvent(Event):
                 f"Invalid channel_time_unit: '{channel_time_unit}'. Valid units: {valid}."
             )
         if boundary_gap_ms <= 0:
-            raise ValueError(
-                f"boundary_gap_ms must be positive, got {boundary_gap_ms}."
-            )
+            raise ValueError(f"boundary_gap_ms must be positive, got {boundary_gap_ms}.")
         self.boundary_gap_ms = boundary_gap_ms
         self.channel_time_unit = channel_time_unit
 
