@@ -360,8 +360,8 @@ class TestTimestampCorrectness:
                 f"!= container start_ts {original_start}"
             )
 
-    def test_last_slice_end_matches_container_stop(self, spark, basic_narrow_db):
-        """The last slice's end_ts must equal the container's original stop_ts."""
+    def test_last_slice_end_is_one_millisecond_before_container_stop(self, spark, basic_narrow_db):
+        """The last slice's end_ts must leave the configured 1ms boundary gap."""
         event = GroupByTimeEvent(name="ts_check", group_by_time="10m")
         solver = KeyValueStoreSolver(spark)
 
@@ -387,13 +387,13 @@ class TestTimestampCorrectness:
         }
 
         for cid, original_stop in original_stops.items():
-            assert max_ends[cid] == original_stop, (
+            assert max_ends[cid] == original_stop - 1, (
                 f"Container {cid}: last slice end_ts {max_ends[cid]} "
-                f"!= container stop_ts {original_stop}"
+                f"!= container stop_ts - 1ms {original_stop - 1}"
             )
 
-    def test_slices_are_contiguous(self, spark, basic_narrow_db):
-        """Each slice's start_ts must equal the previous slice's end_ts (no gaps)."""
+    def test_slices_have_one_millisecond_boundary_gap(self, spark, basic_narrow_db):
+        """Each slice's start_ts must be 1ms after the previous slice's end_ts."""
         event = GroupByTimeEvent(name="contiguous_check", group_by_time="10m")
         solver = KeyValueStoreSolver(spark)
 
@@ -411,9 +411,10 @@ class TestTimestampCorrectness:
 
         # Filter to rows that have a previous slice (skip first slice per container)
         gaps = df_with_prev.filter(
-            (f.col("prev_end_ts").isNotNull()) & (f.col("start_ts") != f.col("prev_end_ts"))
+            (f.col("prev_end_ts").isNotNull())
+            & (f.col("start_ts") != f.col("prev_end_ts") + 1)
         )
-        assert gaps.count() == 0, f"Found {gaps.count()} gaps between slices"
+        assert gaps.count() == 0, f"Found {gaps.count()} unexpected slice boundaries"
 
     def test_no_slice_exceeds_group_by_duration(self, spark, basic_narrow_db):
         """No slice duration should exceed the configured group_by_ms."""
@@ -522,16 +523,16 @@ class TestGroupByTimeEventInReport:
         # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
         expected_slices = {
             1: [
-                (1751528502708, 1751528562708),
-                (1751528562708, 1751528610253),
+                (1751528502708, 1751528562707),
+                (1751528562708, 1751528610252),
             ],
             2: [
-                (1751528501483, 1751528561483),
-                (1751528561483, 1751528610235),
+                (1751528501483, 1751528561482),
+                (1751528561483, 1751528610234),
             ],
             3: [
-                (1751528500169, 1751528560169),
-                (1751528560169, 1751528610252),
+                (1751528500169, 1751528560168),
+                (1751528560169, 1751528610251),
             ],
         }
 
@@ -592,16 +593,16 @@ class TestGroupByTimeEventInReport:
         # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
         expected_slices = {
             1: [
-                (1751528502708, 1751528562708),
-                (1751528562708, 1751528610253),
+                (1751528502708, 1751528562707),
+                (1751528562708, 1751528610252),
             ],
             2: [
-                (1751528501483, 1751528561483),
-                (1751528561483, 1751528610235),
+                (1751528501483, 1751528561482),
+                (1751528561483, 1751528610234),
             ],
             3: [
-                (1751528500169, 1751528560169),
-                (1751528560169, 1751528610252),
+                (1751528500169, 1751528560168),
+                (1751528560169, 1751528610251),
             ],
         }
         expected_total = 6

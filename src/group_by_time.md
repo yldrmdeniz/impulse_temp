@@ -1,5 +1,0 @@
-In src/impulse_reporting/events/group_by_time_event.py the implementation idea is to generate events - just like the ContainerEvent, instead of one event and one set of aggregations, dividing the length of the container to multiple pre-defined slices. In current implementation, the events are generated, however since there is no expression, there is no Interval generated, causing the stats and the histograms etc. to not be calculated per each event.
-
-For example : I have a container that is 1hour long. Instead of using one ContainerEvent, I want to see the max vehicle speed for every 10 minute-long events, meaning I need the impulse_temp to create me 6 events ideally. 0 - 10 mins, 10-20 mins, 20 - 30 mins, 30 - 40 mins, 40 - 50 mins, 50 - 60 mins. Current implementaion cannot achieve to bring me these 6 separate max speed values. 
-
-Review the codebase and either fix the implementation, or if necessary re-implement
