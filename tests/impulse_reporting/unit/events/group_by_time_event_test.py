@@ -3,6 +3,9 @@
 import pytest
 import pyspark.sql.functions as f
 
+from impulse_query_engine.analyze.query.events.group_by_time_expression import (
+    GroupByTimeExpression,
+)
 from impulse_query_engine.analyze.query.solvers.key_value_store_solver import KeyValueStoreSolver
 from impulse_reporting.events.group_by_time_event import (
     GroupByTimeEvent,
@@ -10,6 +13,18 @@ from impulse_reporting.events.group_by_time_event import (
     _parse_duration,
 )
 from tests.conftest import basic_narrow_db, spark
+
+
+def _solve_gbt(spark, db, event, channel_name="Engine RPM"):
+    """Solve a GroupByTimeEvent's expression alongside a channel selector.
+
+    ``GroupByTimeExpression`` carries no channel selectors, so a channel must be
+    co-selected in the same solve batch for the per-container cache to hold data
+    (the slice extent is derived from ``cache.span()``).
+    """
+    solver = KeyValueStoreSolver(spark)
+    channel = db.query.channel(channel_name=channel_name)
+    return db.query.select(channel.alias("_ch"), event.get_expression()).solve(spark, solver)
 
 
 # ===========================================================================
@@ -116,9 +131,24 @@ class TestGetId:
 class TestGetExpression:
     """Tests for get_expression."""
 
-    def test_returns_none(self):
-        event = GroupByTimeEvent(name="no_expr", group_by_time="10m")
-        assert event.get_expression() is None
+    def test_returns_group_by_time_expression(self):
+        event = GroupByTimeEvent(name="expr", group_by_time="10m")
+        expr = event.get_expression()
+        assert isinstance(expr, GroupByTimeExpression)
+
+    def test_expression_slice_width_in_channel_unit(self):
+        # 10m == 600_000 ms; in microseconds that is 600_000 * 1_000.
+        event = GroupByTimeEvent(
+            name="expr", group_by_time="10m", channel_time_unit="us"
+        )
+        assert event.get_expression().slice_width == 600_000 * 1_000
+
+    def test_expression_gap_in_channel_unit(self):
+        # boundary_gap_ms default 1 ms -> 1_000 us.
+        event = GroupByTimeEvent(
+            name="expr", group_by_time="10m", channel_time_unit="us", boundary_gap_ms=1
+        )
+        assert event.get_expression().gap == 1_000
 
 
 # ===========================================================================
@@ -149,7 +179,7 @@ class TestAsDict:
         assert d["event_name"] == "my_event"
         assert d["event_description"] == "test desc"
         assert d["required_channels"] is None
-        assert d["event_expression"] == "NA"
+        assert d["event_expression"].startswith("GroupByTimeExpression")
         assert isinstance(d["definition_hash"], int)
         assert d["attributes"]["grouped_by"] == "10m"
 
@@ -197,17 +227,19 @@ class TestDefinitionHash:
 # determine_events (integration, needs Spark)
 # ===========================================================================
 class TestDetermineEvents:
-    """Tests for determine_events (requires Spark session)."""
+    """Tests for determine_events (requires Spark session).
+
+    ``GroupByTimeEvent`` now slices over the container's channel-data span via a
+    ``GroupByTimeExpression`` solved into a wide ``solved_df`` (the same flow used
+    by ``BasicEvent``).  A channel is co-selected so the per-container cache holds
+    data to derive the slice extent from.
+    """
 
     def test_valid_fact_dataframe(self, spark, basic_narrow_db):
         event = GroupByTimeEvent(name="10min_slices", group_by_time="10m")
 
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=KeyValueStoreSolver(spark),
-        )
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
 
         assert df is not None
         assert set(df.columns) == {
@@ -219,34 +251,74 @@ class TestDetermineEvents:
         }
         assert df.count() > 0
 
+    def test_requires_solved_df(self, spark):
+        event = GroupByTimeEvent(name="slices", group_by_time="10m")
+        with pytest.raises(ValueError, match="requires solved_df"):
+            GroupByTimeEvent.determine_events(spark, [event])
+
     def test_start_ts_less_than_end_ts(self, spark, basic_narrow_db):
         event = GroupByTimeEvent(name="slices", group_by_time="10m")
 
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=KeyValueStoreSolver(spark),
-        )
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
 
         invalid = df.filter(f.col("start_ts") >= f.col("end_ts")).count()
         assert invalid == 0
 
     def test_multiple_slices_per_container(self, spark, basic_narrow_db):
         """Using a small slice duration should produce multiple slices."""
-        event = GroupByTimeEvent(name="small_slices", group_by_time="1s")
+        # Channel data spans tens of seconds per container; 10s slices (in the
+        # microsecond channel unit) therefore yield several slices each.
+        event = GroupByTimeEvent(name="small_slices", group_by_time="10s")
 
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=KeyValueStoreSolver(spark),
-        )
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
 
-        # With 1s (1000ms) slices, we should get more rows than containers
         container_count = df.select("container_id").distinct().count()
         total_slices = df.count()
         assert total_slices > container_count
+
+    def test_event_instance_id_unique_per_slice(self, spark, basic_narrow_db):
+        """Each slice must receive a distinct event_instance_id."""
+        event = GroupByTimeEvent(name="unique_slices", group_by_time="10s")
+
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
+
+        assert df.count() == df.select("event_instance_id").distinct().count()
+
+    def test_distinct_events_have_distinct_ids(self, spark, basic_narrow_db):
+        """Two GroupByTimeEvents with different names produce disjoint ids."""
+        event_a = GroupByTimeEvent(name="slices_a", group_by_time="10s")
+        event_b = GroupByTimeEvent(name="slices_b", group_by_time="10s")
+
+        solver = KeyValueStoreSolver(spark)
+        channel = basic_narrow_db.query.channel(channel_name="Engine RPM")
+        solved_df = basic_narrow_db.query.select(
+            channel.alias("_ch"),
+            event_a.get_expression(),
+            event_b.get_expression(),
+        ).solve(spark, solver)
+
+        df = GroupByTimeEvent.determine_events(
+            spark, [event_a, event_b], solved_df=solved_df
+        )
+
+        ids_a = {
+            row.event_instance_id
+            for row in df.filter(f.col("event_id") == event_a.get_id())
+            .select("event_instance_id")
+            .collect()
+        }
+        ids_b = {
+            row.event_instance_id
+            for row in df.filter(f.col("event_id") == event_b.get_id())
+            .select("event_instance_id")
+            .collect()
+        }
+        assert ids_a and ids_b
+        assert ids_a.isdisjoint(ids_b)
+
 
 
 # ===========================================================================
@@ -277,306 +349,250 @@ class TestDetermineMetadataDf:
 # Timestamp correctness after determine_events (integration)
 # ===========================================================================
 class TestTimestampCorrectness:
-    """Tests that start_ts and end_ts values are correct after slicing."""
+    """Tests that start_ts and end_ts values are correct after slicing.
 
-    def test_first_slice_start_matches_container_start(self, spark, basic_narrow_db):
-        """The first slice's start_ts must equal the container's original start_ts."""
-        event = GroupByTimeEvent(name="ts_check", group_by_time="10m")
-        solver = KeyValueStoreSolver(spark)
+    Slices span the container's channel-data extent (``cache.span()``) in the
+    channel time unit.  Consecutive slices are separated by the configured
+    ``boundary_gap`` so they remain distinct intervals, so slices are *not*
+    contiguous by design (a small gap is lost at each boundary).
+    """
 
-        # Get the original container start timestamps
-        container_tags_df = solver.filter_container_tags(spark, basic_narrow_db.query)
-        container_metrics_df = solver.filter_container_metrics(
-            spark, basic_narrow_db.query, container_tags_df, None
-        )
-        original_starts = {
-            row.container_id: row.start_ts
-            for row in container_metrics_df.select("container_id", "start_ts").collect()
+    def test_first_slice_starts_at_channel_span_start(self, spark, basic_narrow_db):
+        """The first slice start_ts must equal the container's channel-data min tstart."""
+        event = GroupByTimeEvent(name="ts_check", group_by_time="10s")
+        # _solve_gbt co-selects "Engine RPM" (channel_id 5 in this fixture), so the
+        # slice extent derives from that channel's span only.
+        channel_min = {
+            row.container_id: row.mn
+            for row in basic_narrow_db.query.db.channels(spark)
+            .filter(f.col("channel_id") == 5)
+            .groupBy("container_id")
+            .agg(f.min("tstart").alias("mn"))
+            .collect()
         }
 
-        # Get the event slices
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=solver,
-        )
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
 
-        # For each container, the minimum start_ts should equal the original
         min_starts = {
             row.container_id: row.min_start
             for row in df.groupBy("container_id")
             .agg(f.min("start_ts").alias("min_start"))
             .collect()
         }
-
-        for cid, original_start in original_starts.items():
-            assert min_starts[cid] == original_start, (
-                f"Container {cid}: first slice start_ts {min_starts[cid]} "
-                f"!= container start_ts {original_start}"
+        for cid, min_start in min_starts.items():
+            assert min_start == channel_min[cid], (
+                f"Container {cid}: first slice start_ts {min_start} "
+                f"!= channel span start {channel_min[cid]}"
             )
 
-    def test_last_slice_end_matches_container_stop(self, spark, basic_narrow_db):
-        """The last slice's end_ts must equal the container's original stop_ts."""
-        event = GroupByTimeEvent(name="ts_check", group_by_time="10m")
-        solver = KeyValueStoreSolver(spark)
-
-        container_tags_df = solver.filter_container_tags(spark, basic_narrow_db.query)
-        container_metrics_df = solver.filter_container_metrics(
-            spark, basic_narrow_db.query, container_tags_df, None
-        )
-        original_stops = {
-            row.container_id: row.stop_ts
-            for row in container_metrics_df.select("container_id", "stop_ts").collect()
+    def test_last_slice_ends_at_channel_span_end(self, spark, basic_narrow_db):
+        """The last slice end_ts must equal the container's channel-data max tend."""
+        event = GroupByTimeEvent(name="ts_check", group_by_time="10s")
+        # _solve_gbt co-selects "Engine RPM" (channel_id 5 in this fixture), so the
+        # slice extent derives from that channel's span only.
+        channel_max = {
+            row.container_id: row.mx
+            for row in basic_narrow_db.query.db.channels(spark)
+            .filter(f.col("channel_id") == 5)
+            .groupBy("container_id")
+            .agg(f.max("tend").alias("mx"))
+            .collect()
         }
 
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=solver,
-        )
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
 
         max_ends = {
             row.container_id: row.max_end
             for row in df.groupBy("container_id").agg(f.max("end_ts").alias("max_end")).collect()
         }
-
-        for cid, original_stop in original_stops.items():
-            assert max_ends[cid] == original_stop, (
-                f"Container {cid}: last slice end_ts {max_ends[cid]} "
-                f"!= container stop_ts {original_stop}"
+        for cid, max_end in max_ends.items():
+            assert max_end == channel_max[cid], (
+                f"Container {cid}: last slice end_ts {max_end} "
+                f"!= channel span end {channel_max[cid]}"
             )
 
-    def test_slices_are_contiguous(self, spark, basic_narrow_db):
-        """Each slice's start_ts must equal the previous slice's end_ts (no gaps)."""
-        event = GroupByTimeEvent(name="contiguous_check", group_by_time="10m")
-        solver = KeyValueStoreSolver(spark)
-
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=solver,
+    def test_boundary_gap_between_consecutive_slices(self, spark, basic_narrow_db):
+        """Consecutive slices must be separated by exactly the boundary gap."""
+        # boundary_gap_ms=1 -> 1_000 us in the channel unit.
+        event = GroupByTimeEvent(
+            name="gap_check", group_by_time="10s", boundary_gap_ms=1, channel_time_unit="us"
         )
+        expected_gap = 1_000
+
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
 
         from pyspark.sql.window import Window
 
         w = Window.partitionBy("container_id").orderBy("start_ts")
         df_with_prev = df.withColumn("prev_end_ts", f.lag("end_ts").over(w))
-
-        # Filter to rows that have a previous slice (skip first slice per container)
-        gaps = df_with_prev.filter(
-            (f.col("prev_end_ts").isNotNull()) & (f.col("start_ts") != f.col("prev_end_ts"))
+        bad_gaps = df_with_prev.filter(
+            (f.col("prev_end_ts").isNotNull())
+            & ((f.col("start_ts") - f.col("prev_end_ts")) != f.lit(expected_gap))
         )
-        assert gaps.count() == 0, f"Found {gaps.count()} gaps between slices"
+        assert bad_gaps.count() == 0, (
+            f"Found {bad_gaps.count()} slice boundaries not separated by {expected_gap}"
+        )
 
     def test_no_slice_exceeds_group_by_duration(self, spark, basic_narrow_db):
-        """No slice duration should exceed the configured group_by_ms."""
-        group_by_time = "10m"
-        group_by_ms = 600_000
-        event = GroupByTimeEvent(name="duration_check", group_by_time=group_by_time)
-        solver = KeyValueStoreSolver(spark)
-
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=solver,
+        """No slice duration should exceed the configured slice width (channel unit)."""
+        event = GroupByTimeEvent(
+            name="duration_check", group_by_time="10s", channel_time_unit="us"
         )
+        slice_width_us = 10 * 1_000_000  # 10s in microseconds
 
-        violations = df.filter((f.col("end_ts") - f.col("start_ts")) > group_by_ms)
-        assert (
-            violations.count() == 0
-        ), f"Found {violations.count()} slices exceeding {group_by_time}"
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
+
+        violations = df.filter((f.col("end_ts") - f.col("start_ts")) > slice_width_us)
+        assert violations.count() == 0, f"Found {violations.count()} slices exceeding 10s"
 
     def test_all_slices_have_positive_duration(self, spark, basic_narrow_db):
         """Every slice must have end_ts > start_ts."""
-        event = GroupByTimeEvent(name="positive_dur", group_by_time="10m")
-        solver = KeyValueStoreSolver(spark)
+        event = GroupByTimeEvent(name="positive_dur", group_by_time="10s")
 
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=solver,
-        )
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
 
         invalid = df.filter(f.col("end_ts") <= f.col("start_ts"))
         assert invalid.count() == 0, f"Found {invalid.count()} slices with end_ts <= start_ts"
 
     def test_start_ts_and_end_ts_are_long_type(self, spark, basic_narrow_db):
-        """start_ts and end_ts must be LongType (epoch milliseconds)."""
+        """start_ts and end_ts must be LongType (epoch time in the channel unit)."""
         from pyspark.sql.types import LongType
 
-        event = GroupByTimeEvent(name="type_check", group_by_time="10m")
-        solver = KeyValueStoreSolver(spark)
+        event = GroupByTimeEvent(name="type_check", group_by_time="10s")
 
-        df = GroupByTimeEvent.determine_events(
-            spark,
-            [event],
-            query=basic_narrow_db.query,
-            solver=solver,
-        )
+        solved_df = _solve_gbt(spark, basic_narrow_db, event)
+        df = GroupByTimeEvent.determine_events(spark, [event], solved_df=solved_df)
 
         schema_fields = {field.name: field.dataType for field in df.schema.fields}
         assert isinstance(schema_fields["start_ts"], LongType)
         assert isinstance(schema_fields["end_ts"], LongType)
 
 
+
 # ===========================================================================
 # End-to-end Report integration (determine_report)
 # ===========================================================================
 class TestGroupByTimeEventInReport:
-    """Integration test: GroupByTimeEvent through a full Report.determine_report cycle."""
+    """Integration test: GroupByTimeEvent through a full Report.determine_report cycle.
+
+    A ``StatsAggregator`` bound to the event is included so a channel is loaded
+    into the solve batch (the slice extent derives from the container's
+    channel-data span).  The key invariant is that the ``event_instance_id``
+    values in the event-instance fact and the aggregation fact align, so the two
+    facts can be joined on ``event_instance_id``.
+    """
+
+    @staticmethod
+    def _build_report(spark, basic_narrow_db, name):
+        from unittest.mock import create_autospec, patch
+
+        from databricks.sdk import WorkspaceClient
+
+        from impulse_reporting.core.report import Report
+
+        config = {
+            "source": {
+                "container_metrics_table": "spark_catalog.silver.container_metrics",
+                "channel_metrics_table": "spark_catalog.silver.channel_metrics",
+                "channels_uri": "spark_catalog.silver.channels",
+            },
+            "query_engine": {"solver": "KeyValueStoreSolver"},
+        }
+
+        with (
+            patch.object(Report, "create_measurement_db", return_value=basic_narrow_db),
+            patch.object(Report, "create_query_builder", return_value=basic_narrow_db.query),
+            patch.object(Report, "create_solver", return_value=KeyValueStoreSolver(spark)),
+            patch.object(Report, "create_sink", return_value=None),
+        ):
+            report = Report(
+                name=name,
+                spark=spark,
+                workspace_client=create_autospec(WorkspaceClient),
+                config=config,
+            )
+        return report
 
     def test_report_determine_produces_valid_timestamps(self, spark, basic_narrow_db):
-        """Running determine_report with a GroupByTimeEvent yields correct start_ts/end_ts."""
-        from unittest.mock import create_autospec, patch
+        """determine_report with a GroupByTimeEvent yields multiple valid slices."""
+        from impulse_reporting.aggregations.stats_aggregator import StatsAggregator
+        from impulse_reporting.core.page import Page
 
-        from databricks.sdk import WorkspaceClient
+        report = self._build_report(spark, basic_narrow_db, "test_groupby_report")
 
-        from impulse_reporting.core.report import Report
-        from impulse_reporting.events.group_by_time_event import GroupByTimeEvent
-
-        config = {
-            "source": {
-                "container_metrics_table": "spark_catalog.silver.container_metrics",
-                "channel_metrics_table": "spark_catalog.silver.channel_metrics",
-                "channels_uri": "spark_catalog.silver.channels",
-            },
-            "query_engine": {"solver": "KeyValueStoreSolver"},
-        }
-
-        with (
-            patch.object(Report, "create_measurement_db", return_value=basic_narrow_db),
-            patch.object(Report, "create_query_builder", return_value=basic_narrow_db.query),
-            patch.object(Report, "create_solver", return_value=KeyValueStoreSolver(spark)),
-            patch.object(Report, "create_sink", return_value=None),
-        ):
-            report = Report(
-                name="test_groupby_report",
-                spark=spark,
-                workspace_client=create_autospec(WorkspaceClient),
-                config=config,
-            )
-
-        event = GroupByTimeEvent(name="1min_slices", group_by_time="1m")
+        event = GroupByTimeEvent(name="10s_slices", group_by_time="10s")
         report.add_event(event)
+
+        page = Page(page_number=1)
+        report.add_page(page)
+        page.add_aggregation(
+            StatsAggregator(
+                name="rpm_stats",
+                input_expressions=[report.get_db().query.channel(channel_name="Engine RPM")],
+                channel_names=["Engine RPM"],
+                statistics=["min", "max", "mean"],
+                event=event,
+            )
+        )
+
         report.determine_report()
 
-        # Get the event fact DataFrame from report
-        event_dfs = report.event_dfs
-        assert "GROUP_BY_TIME_EVENT" in event_dfs
-
-        changed_df = event_dfs["GROUP_BY_TIME_EVENT"]["changed"]
+        assert "GROUP_BY_TIME_EVENT" in report.event_dfs
+        changed_df = report.event_dfs["GROUP_BY_TIME_EVENT"]["changed"]
         assert changed_df is not None
 
-        # Expected slices with 1m (60s) duration:
-        # cid=1: start=1751528502708, stop=1751528610253, dur=107545ms → 2 slices
-        # cid=2: start=1751528501483, stop=1751528610235, dur=108752ms → 2 slices
-        # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
-        expected_slices = {
-            1: [
-                (1751528502708, 1751528562708),
-                (1751528562708, 1751528610253),
-            ],
-            2: [
-                (1751528501483, 1751528561483),
-                (1751528561483, 1751528610235),
-            ],
-            3: [
-                (1751528500169, 1751528560169),
-                (1751528560169, 1751528610252),
-            ],
-        }
+        container_count = changed_df.select("container_id").distinct().count()
+        total_slices = changed_df.count()
+        assert total_slices > container_count, "expected multiple slices per container"
 
-        assert changed_df.count() == 6, f"Expected 6 slices total, got {changed_df.count()}"
+        # Every slice is a valid, positive-duration interval.
+        invalid = changed_df.filter(f.col("start_ts") >= f.col("end_ts")).count()
+        assert invalid == 0
 
-        # Verify exact start_ts/end_ts per container
-        rows = changed_df.orderBy("container_id", "start_ts").collect()
-        actual_slices = {}
-        for row in rows:
-            actual_slices.setdefault(row.container_id, []).append((row.start_ts, row.end_ts))
+        # event_instance_id is unique per slice.
+        assert total_slices == changed_df.select("event_instance_id").distinct().count()
 
-        for cid, expected in expected_slices.items():
-            actual = actual_slices[cid]
-            assert actual == expected, f"Container {cid}: expected {expected}, got {actual}"
+    def test_event_and_aggregation_ids_match(self, spark, basic_narrow_db):
+        """The core fix: aggregation event_instance_ids all map to event ids."""
+        from impulse_reporting.aggregations.stats_aggregator import StatsAggregator
+        from impulse_reporting.core.page import Page
 
-    def test_report_produces_exact_slice_count(self, spark, basic_narrow_db):
-        """Verify the exact number of slices matches ceil(duration / group_by_ms) per container."""
-        from unittest.mock import create_autospec, patch
+        report = self._build_report(spark, basic_narrow_db, "test_id_match_report")
 
-        from databricks.sdk import WorkspaceClient
-
-        from impulse_reporting.core.report import Report
-        from impulse_reporting.events.group_by_time_event import GroupByTimeEvent
-
-        config = {
-            "source": {
-                "container_metrics_table": "spark_catalog.silver.container_metrics",
-                "channel_metrics_table": "spark_catalog.silver.channel_metrics",
-                "channels_uri": "spark_catalog.silver.channels",
-            },
-            "query_engine": {"solver": "KeyValueStoreSolver"},
-        }
-
-        with (
-            patch.object(Report, "create_measurement_db", return_value=basic_narrow_db),
-            patch.object(Report, "create_query_builder", return_value=basic_narrow_db.query),
-            patch.object(Report, "create_solver", return_value=KeyValueStoreSolver(spark)),
-            patch.object(Report, "create_sink", return_value=None),
-        ):
-            report = Report(
-                name="test_slice_count_report",
-                spark=spark,
-                workspace_client=create_autospec(WorkspaceClient),
-                config=config,
-            )
-
-        group_by_time = "1m"
-        group_by_ms = 60_000
-        event = GroupByTimeEvent(name="1min_slices", group_by_time=group_by_time)
+        event = GroupByTimeEvent(name="10s_slices", group_by_time="10s")
         report.add_event(event)
+
+        page = Page(page_number=1)
+        report.add_page(page)
+        page.add_aggregation(
+            StatsAggregator(
+                name="rpm_stats",
+                input_expressions=[report.get_db().query.channel(channel_name="Engine RPM")],
+                channel_names=["Engine RPM"],
+                statistics=["min", "max", "mean"],
+                event=event,
+            )
+        )
+
         report.determine_report()
 
-        changed_df = report.event_dfs["GROUP_BY_TIME_EVENT"]["changed"]
+        event_df = report.event_dfs["GROUP_BY_TIME_EVENT"]["changed"]
+        stats_df = report.aggregation_dfs["STATS_AGGREGATOR"]["changed"]
 
-        # Hardcoded expected slices with 1m (60000ms) duration:
-        # cid=1: start=1751528502708, stop=1751528610253, dur=107545ms → 2 slices
-        # cid=2: start=1751528501483, stop=1751528610235, dur=108752ms → 2 slices
-        # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
-        expected_slices = {
-            1: [
-                (1751528502708, 1751528562708),
-                (1751528562708, 1751528610253),
-            ],
-            2: [
-                (1751528501483, 1751528561483),
-                (1751528561483, 1751528610235),
-            ],
-            3: [
-                (1751528500169, 1751528560169),
-                (1751528560169, 1751528610252),
-            ],
-        }
-        expected_total = 6
+        event_ids = event_df.select("event_instance_id").distinct()
+        stats_ids = stats_df.select("event_instance_id").distinct()
 
-        # Assert total slice count
-        actual_total = changed_df.count()
-        assert (
-            actual_total == expected_total
-        ), f"Expected {expected_total} total slices, got {actual_total}"
+        n_stats_ids = stats_ids.count()
+        matched = stats_ids.join(event_ids, on="event_instance_id", how="inner").count()
 
-        # Assert exact start_ts/end_ts per container
-        rows = changed_df.orderBy("container_id", "start_ts").collect()
-        actual_slices = {}
-        for row in rows:
-            actual_slices.setdefault(row.container_id, []).append((row.start_ts, row.end_ts))
+        assert n_stats_ids > 0, "aggregation must produce rows"
+        assert matched == n_stats_ids, (
+            "every aggregation event_instance_id must correspond to an event "
+            f"event_instance_id (matched {matched} of {n_stats_ids})"
+        )
 
-        for cid, expected in expected_slices.items():
-            actual = actual_slices[cid]
-            assert len(actual) == len(
-                expected
-            ), f"Container {cid}: expected {len(expected)} slices, got {len(actual)}"
-            assert actual == expected, f"Container {cid}: expected {expected}, got {actual}"

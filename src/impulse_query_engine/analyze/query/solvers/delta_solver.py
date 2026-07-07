@@ -83,6 +83,20 @@ class DeltaTimeSeriesCache(SeriesCache):
         s = self.pdf[(self.pdf[self._cid_col] == mid) & (self.pdf[self._ch_col] == cid)]
         return SampleSeries(s[self._ts_col], s[self._te_col], s[self._val_col])
 
+    def span(self):
+        """
+        Return ``(min_start, max_end)`` across all channel data in this cache.
+
+        Returns
+        -------
+        tuple of (float, float) or None
+            The overall time span in the cache's native time unit, or ``None``
+            when the cache holds no rows.
+        """
+        if len(self.pdf) == 0:
+            return None
+        return (float(self.pdf[self._ts_col].min()), float(self.pdf[self._te_col].max()))
+
 
 class DeltaSolver(QuerySolver):
     def __init__(

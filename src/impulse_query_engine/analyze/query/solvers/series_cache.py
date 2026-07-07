@@ -48,3 +48,20 @@ class SeriesCache(ABC):
             The loaded sample series object.
         """
         pass
+
+    def span(self) -> tuple[float, float] | None:
+        """
+        Return the overall time span of the data held by this cache.
+
+        The span is the pair ``(min_start, max_end)`` across every sample of
+        every channel in the cache, expressed in the cache's native time unit.
+        Expressions that are not bound to a specific channel (for example a
+        fixed-duration time-slicer) use this to know the container's extent.
+
+        Returns
+        -------
+        tuple of (float, float) or None
+            ``(min_start, max_end)`` of the cached data, or ``None`` when the
+            cache holds no data or does not track a span.
+        """
+        return None

@@ -12,6 +12,9 @@ import zlib
 from pyspark.sql import DataFrame, Row, SparkSession
 from pyspark.sql.types import LongType
 
+from impulse_query_engine.analyze.query.events.group_by_time_expression import (
+    GroupByTimeExpression,
+)
 from impulse_query_engine.analyze.query.query_builder import QueryBuilder
 from impulse_query_engine.analyze.query.solvers.query_solver import QuerySolver
 from impulse_reporting.events.event import Event
@@ -40,6 +43,16 @@ _UNIT_TO_MS = {
     "m": 60_000,
     "h": 3_600_000,
     "d": 86_400_000,
+}
+
+# Channel-data time unit -> number of those units per millisecond.  Used to
+# translate the human-specified slice/gap durations (milliseconds) into the
+# unit the channel data (and therefore the solve cache span) is stored in.
+_UNIT_PER_MS = {
+    "s": 0.001,
+    "ms": 1.0,
+    "us": 1_000.0,
+    "ns": 1_000_000.0,
 }
 
 _VALID_UNITS = {u.value for u in TimeUnit}
@@ -98,6 +111,8 @@ class GroupByTimeEvent(Event):
         group_by_time: str,
         desc: str | None = None,
         attributes: Mapping[str, str] | None = None,
+        boundary_gap_ms: int = 1,
+        channel_time_unit: str = "us",
     ):
         """
         Initialise a GroupByTimeEvent.
@@ -112,12 +127,44 @@ class GroupByTimeEvent(Event):
             Human-readable description.
         attributes : Mapping[str, str], optional
             Key-value metadata for the event.
+        boundary_gap_ms : int, optional
+            Width, in milliseconds, of the small gap inserted at every slice
+            boundary so that consecutive slices remain distinct intervals.
+            Each slice therefore "loses" this much time at its trailing edge.
+            Defaults to ``1`` (1 millisecond).
+        channel_time_unit : str, optional
+            Time unit of the channel-data timestamps the slices are evaluated
+            against. One of ``"s"``, ``"ms"``, ``"us"``, ``"ns"``. The slice
+            width and boundary gap are converted into this unit so the produced
+            intervals align with the channel data. Defaults to ``"us"``
+            (microseconds).
         """
         super().__init__(name)
         self.group_by_time = group_by_time
         self._group_by_ms = _parse_duration(group_by_time)
         self.description = desc
         self.required_channels = None
+
+        if channel_time_unit not in _UNIT_PER_MS:
+            valid = ", ".join(sorted(_UNIT_PER_MS))
+            raise ValueError(
+                f"Invalid channel_time_unit: '{channel_time_unit}'. Valid units: {valid}."
+            )
+        if boundary_gap_ms <= 0:
+            raise ValueError(
+                f"boundary_gap_ms must be positive, got {boundary_gap_ms}."
+            )
+        self.boundary_gap_ms = boundary_gap_ms
+        self.channel_time_unit = channel_time_unit
+
+        # Translate the human-specified slice width and boundary gap
+        # (milliseconds) into the channel-data time unit so the synthetic
+        # mask aligns with the data being sliced.
+        units_per_ms = _UNIT_PER_MS[channel_time_unit]
+        slice_width = self._group_by_ms * units_per_ms
+        gap = self.boundary_gap_ms * units_per_ms
+        self.expression = GroupByTimeExpression(slice_width, gap).alias(name)
+
         normalized_attributes: dict[str, str] = {}
         if attributes is not None:
             normalized_attributes = {str(k): str(v) for k, v in attributes.items()}
@@ -139,13 +186,15 @@ class GroupByTimeEvent(Event):
         return zlib.crc32(self.name.encode()) & 0x7FFFFFFF
 
     def get_expression(self) -> TimeSeriesExpression | None:
-        """GroupByTimeEvent has no time-series expression.
+        """Return the time-slicing expression for this event.
 
         Returns
         -------
-        None
+        TimeSeriesExpression
+            A ``GroupByTimeExpression`` that yields one interval per time
+            slice when solved against a container's channel data.
         """
-        return None
+        return self.expression
 
     def get_event_type_str(self) -> str:
         """Get the event type string for GroupByTimeEvent.
@@ -215,105 +264,76 @@ class GroupByTimeEvent(Event):
         solver: QuerySolver = None,
         pre_filtered_containers_df: DataFrame = None,
     ) -> DataFrame:
-        """Determine event instances by splitting containers into time slices.
+        """Determine event instances by exploding the solved time slices.
+
+        The event's ``GroupByTimeExpression`` is solved as part of the
+        centralized batch solve, producing one ``[start_ts, end_ts]`` interval
+        per time slice in each container's solved column.  This method mirrors
+        ``BasicEvent.determine_events``: it unpivots and explodes those
+        intervals into event-instance fact rows so the resulting
+        ``event_instance_id`` values match the ones produced by aggregations
+        that share the same event expression.
 
         Parameters
         ----------
         spark : SparkSession
             Active Spark session.
         events : list of GroupByTimeEvent
-            List of GroupByTimeEvent objects (only the first is used).
+            List of GroupByTimeEvent objects to process.
         solved_df : DataFrame, optional
-            Not used (kept for interface compatibility).
+            Pre-solved wide DataFrame from the centralized batch solve. Required.
         query : QueryBuilder, optional
-            Query builder with filters applied.
+            Unused (kept for interface compatibility).
         solver : QuerySolver, optional
-            Solver whose filter pipeline is used for container resolution.
+            Unused (kept for interface compatibility).
         pre_filtered_containers_df : DataFrame, optional
-            Pre-filtered containers for incremental processing.
+            Unused (kept for interface compatibility).
 
         Returns
         -------
         DataFrame
             Spark DataFrame matching ``EVENT_INSTANCE_FACT_SCHEMA``.
         """
-        event = events[0]
-        group_by_ms = event._group_by_ms
-
-        # Resolve containers via solver filter pipeline
-        container_tags_df = solver.filter_container_tags(spark, query)
-        container_metrics_df = solver.filter_container_metrics(
-            spark, query, container_tags_df, pre_filtered_containers_df
-        )
-
-        # Normalize timestamps to epoch milliseconds (LongType).
-        # If columns are TimestampType, convert to epoch ms first.
-        start_ts_col = solver.config.start_ts_col
-        stop_ts_col = solver.config.stop_ts_col
-
-        # stop_ts_col may not exist if column_name_mapping already renamed it
-        _actual_stop_col = stop_ts_col if stop_ts_col in container_metrics_df.columns else "end_ts"
-
-        from pyspark.sql.types import TimestampType as _TsType
-
-        _src_dtype = container_metrics_df.schema[start_ts_col].dataType
-        if isinstance(_src_dtype, _TsType):
-            container_metrics_df = container_metrics_df.withColumn(
-                start_ts_col,
-                (f.col(start_ts_col).cast("double") * 1000).cast("long"),
-            ).withColumn(
-                _actual_stop_col,
-                (f.col(_actual_stop_col).cast("double") * 1000).cast("long"),
+        if solved_df is None:
+            raise ValueError(
+                "GroupByTimeEvent.determine_events requires solved_df. "
+                "Provide a pre-solved DataFrame from the centralized batch-solve flow."
             )
 
+        event_names = [event.get_name() for event in events]
+
         df = (
-            container_metrics_df.withColumnRenamed(_actual_stop_col, "end_ts")
-            .withColumn("start_ts", f.col(start_ts_col).cast("long"))
-            .withColumn("end_ts", f.col("end_ts").cast("long"))
+            solved_df.select("container_id", *event_names)
+            .unpivot(
+                f.col("container_id"),
+                event_names,
+                variableColumnName="event_name",
+                valueColumnName="value",
+            )
+            .select(
+                "container_id",
+                "event_name",
+                f.explode(f.col("value")).alias("event_instance"),
+            )
+            .withColumn("start_ts", f.col("event_instance").getItem(0))
+            .withColumn("end_ts", f.col("event_instance").getItem(1))
+            .withColumn(
+                "event_instance_id",
+                generate_event_instance_id_column(event_type=GroupByTimeEvent),
+            )
+            .withColumn(
+                "event_id",
+                ReportEntityUtil.get_event_id_column(elements=events, element_name="event_name"),
+            )
+            # Cast the interval bounds to LongType *after* event_instance_id is
+            # computed from the (double) interval values, so the hash matches the
+            # aggregation fact which derives its id from the same double values.
+            .withColumn("start_ts", f.col("start_ts").cast(LongType()))
+            .withColumn("end_ts", f.col("end_ts").cast(LongType()))
+            .select(EVENT_INSTANCE_FACT_SCHEMA.fieldNames())
+            .where(f.col("start_ts") < f.col("end_ts"))  # Ensure valid time intervals
         )
-
-        # Compute number of slices per container
-        df = df.withColumn(
-            "_num_slices",
-            f.ceil((f.col("end_ts") - f.col("start_ts")) / f.lit(group_by_ms)).cast("int"),
-        )
-
-        # Explode into slice indices
-        df = df.withColumn(
-            "_slice_index",
-            f.explode(f.sequence(f.lit(0), f.col("_num_slices") - 1)),
-        )
-
-        # Compute slice boundaries
-        df = df.withColumn(
-            "start_ts",
-            (f.col("start_ts") + f.col("_slice_index") * f.lit(group_by_ms)).cast(LongType()),
-        )
-        df = df.withColumn(
-            "end_ts",
-            f.least(
-                f.col("start_ts") + f.lit(group_by_ms),
-                f.col("end_ts"),
-            ).cast(LongType()),
-        )
-
-        # Add event_name for downstream utilities
-        df = df.withColumn("event_name", f.lit(event.get_name()))
-
-        # Generate event_instance_id (uses composite key hash)
-        df = df.withColumn(
-            "event_instance_id",
-            generate_event_instance_id_column(event_type=GroupByTimeEvent),
-        )
-
-        # Add event_id column
-        df = df.withColumn(
-            "event_id",
-            ReportEntityUtil.get_event_id_column(elements=events, element_name="event_name"),
-        )
-
-        # Select only the columns defined in the fact schema
-        return df.select(EVENT_INSTANCE_FACT_SCHEMA.fieldNames())
+        return df
 
     @classmethod
     def determine_metadata_df(
