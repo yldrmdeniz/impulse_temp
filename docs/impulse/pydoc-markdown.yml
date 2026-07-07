@@ -6,6 +6,7 @@ loaders:
       - impulse_reporting.core.page
       - impulse_reporting.events.basic_event
       - impulse_reporting.events.container_event
+      - impulse_reporting.events.group_by_time_event
       - impulse_reporting.events.sequence_of_events
       - impulse_reporting.aggregations.histogram
       - impulse_reporting.aggregations.histogram2d

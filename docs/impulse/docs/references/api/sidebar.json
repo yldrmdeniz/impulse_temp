@@ -90,6 +90,7 @@
           "items": [
             "references/api/impulse_reporting/events/basic_event",
             "references/api/impulse_reporting/events/container_event",
+            "references/api/impulse_reporting/events/group_by_time_event",
             "references/api/impulse_reporting/events/sequence_of_events"
           ],
           "label": "impulse_reporting.events",
