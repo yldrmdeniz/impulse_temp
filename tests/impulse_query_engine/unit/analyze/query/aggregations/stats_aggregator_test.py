@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import numpy.testing as nptest
+import pandas as pd
 
 from impulse_query_engine.analyze.metadata.tag_expression import TagSelector
 from impulse_query_engine.analyze.metadata.time_series_expression import (
@@ -17,6 +18,7 @@ from impulse_query_engine.analyze.metadata.time_series_expression import (
 from impulse_query_engine.analyze.query.aggregations.stats_aggregator import (
     StatsAggregator,
 )
+from impulse_query_engine.analyze.query.events import FixedDurationIntervalsExpression
 from impulse_query_engine.model.series.sample_series import SampleSeries
 
 
@@ -511,6 +513,52 @@ def test_build_with_none_event_expression_uses_synced_series_bounds():
     assert string_values == []
 
 
+def test_build_with_fixed_duration_event_expression_returns_slice_stats():
+    """Fixed-duration events create one stats result per generated time slice."""
+    expr = MagicMock()
+    expr.build.return_value = SampleSeries(
+        tstarts=np.array([0.0, 10.0, 20.0, 30.0, 40.0, 50.0]),
+        tends=np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+        values=np.array([1.0, 5.0, 3.0, 8.0, 2.0, 7.0]),
+    )
+    stats_agg = StatsAggregator(
+        input_expressions=[expr],
+        event_expression=FixedDurationIntervalsExpression(duration=10.0),
+        statistics=["max"],
+    )
+    cache = MagicMock()
+    cache.pdf = pd.DataFrame(
+        {
+            "tstart": [0.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+            "tend": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        }
+    )
+    cache._ts_col = "tstart"
+    cache._te_col = "tend"
+
+    event_timestamps, numeric_values, string_values = stats_agg.build(cache=cache)
+
+    assert event_timestamps == [
+        [0.0, 10.0],
+        [10.0, 20.0],
+        [20.0, 30.0],
+        [30.0, 40.0],
+        [40.0, 50.0],
+        [50.0, 60.0],
+    ]
+    assert numeric_values == [
+        [
+            {"max": 1.0},
+            {"max": 5.0},
+            {"max": 3.0},
+            {"max": 8.0},
+            {"max": 2.0},
+            {"max": 7.0},
+        ]
+    ]
+    assert string_values == []
+
+
 def test_has_required_methods():
     """Test that StatsAggregator has all required methods."""
     selector = TimeSeriesSelector(TagSelector("name") == "test_signal")
@@ -579,6 +627,7 @@ def test_stats_aggregator_get_selectors_with_event():
     assert sel in result
     assert evt in result
 
+
 def test_stats_aggregator_validates_unsupported_statistics():
     """StatsAggregator raises ValueError for unsupported statistic types."""
     import pytest
@@ -599,6 +648,7 @@ def test_stats_aggregator_accepts_all_supported_statistics():
         statistics=["min", "max", "mean", "median", "start", "end"],
     )
     assert agg.statistics == ["min", "max", "mean", "median", "start", "end"]
+
 
 def test_calculate_aggregations_diff_start_end_basic():
     """Test that diff_start_end computes last value minus first value."""

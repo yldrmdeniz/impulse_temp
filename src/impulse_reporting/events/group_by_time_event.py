@@ -13,6 +13,7 @@ from pyspark.sql import DataFrame, Row, SparkSession
 from pyspark.sql.types import LongType
 
 from impulse_query_engine.analyze.query.query_builder import QueryBuilder
+from impulse_query_engine.analyze.query.events import FixedDurationIntervalsExpression
 from impulse_query_engine.analyze.query.solvers.query_solver import QuerySolver
 from impulse_reporting.events.event import Event
 from impulse_reporting.persist.dimension_schema import EVENT_DIMENSION_SCHEMA
@@ -138,14 +139,14 @@ class GroupByTimeEvent(Event):
         """
         return zlib.crc32(self.name.encode()) & 0x7FFFFFFF
 
-    def get_expression(self) -> TimeSeriesExpression | None:
-        """GroupByTimeEvent has no time-series expression.
+    def get_expression(self) -> TimeSeriesExpression:
+        """Return the fixed-duration interval expression for aggregations.
 
         Returns
         -------
-        None
+        TimeSeriesExpression
         """
-        return None
+        return FixedDurationIntervalsExpression(self._group_by_ms)
 
     def get_event_type_str(self) -> str:
         """Get the event type string for GroupByTimeEvent.

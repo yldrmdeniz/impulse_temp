@@ -35,6 +35,7 @@ from impulse_reporting.core.report_utils import (
 from impulse_reporting.events.container_event import ContainerEvent
 from impulse_reporting.events.event import Event
 from impulse_reporting.events.event_types import EventType
+from impulse_reporting.events.group_by_time_event import GroupByTimeEvent
 from impulse_reporting.incremental.container_detector import ContainerUpsertDetector
 from impulse_reporting.incremental.definition_hash_comparator import (
     DefinitionHashComparator,
@@ -957,12 +958,12 @@ class Report:
             )
         )
 
-        # Collect all solvable expressions (exclude ContainerEvent)
+        # Collect all solvable expressions (exclude event types resolved from container metadata)
         all_changed_expressions = collect_solvable_expressions(
-            changed_events_by_type, EventType, exclude_cls=ContainerEvent
+            changed_events_by_type, EventType, exclude_cls=(ContainerEvent, GroupByTimeEvent)
         ) + collect_solvable_expressions(changed_aggs_by_type, AggregationType)
         all_unchanged_expressions = collect_solvable_expressions(
-            unchanged_events_by_type, EventType, exclude_cls=ContainerEvent
+            unchanged_events_by_type, EventType, exclude_cls=(ContainerEvent, GroupByTimeEvent)
         ) + collect_solvable_expressions(unchanged_aggs_by_type, AggregationType)
 
         # Centralized solve

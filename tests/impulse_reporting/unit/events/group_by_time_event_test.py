@@ -116,9 +116,10 @@ class TestGetId:
 class TestGetExpression:
     """Tests for get_expression."""
 
-    def test_returns_none(self):
-        event = GroupByTimeEvent(name="no_expr", group_by_time="10m")
-        assert event.get_expression() is None
+    def test_returns_fixed_duration_expression(self):
+        event = GroupByTimeEvent(name="sliced_expr", group_by_time="10m")
+        assert event.get_expression() is not None
+        assert str(event.get_expression()) == "FixedDurationIntervalsExpression<duration=600000>"
 
 
 # ===========================================================================

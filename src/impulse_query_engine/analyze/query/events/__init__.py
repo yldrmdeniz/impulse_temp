@@ -1,1 +1,2 @@
+from .fixed_duration_intervals_expression import FixedDurationIntervalsExpression
 from .sequence_of_events_expression import SequenceOfEventsExpression
