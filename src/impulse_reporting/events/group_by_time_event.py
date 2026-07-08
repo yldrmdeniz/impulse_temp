@@ -13,6 +13,7 @@ from pyspark.sql import DataFrame, Row, SparkSession
 from pyspark.sql.types import LongType
 
 from impulse_query_engine.analyze.query.query_builder import QueryBuilder
+from impulse_query_engine.analyze.query.events import FixedDurationIntervalsExpression
 from impulse_query_engine.analyze.query.solvers.query_solver import QuerySolver
 from impulse_reporting.events.event import Event
 from impulse_reporting.persist.dimension_schema import EVENT_DIMENSION_SCHEMA
@@ -123,6 +124,7 @@ class GroupByTimeEvent(Event):
             normalized_attributes = {str(k): str(v) for k, v in attributes.items()}
         normalized_attributes["grouped_by"] = self.group_by_time
         self.attributes = normalized_attributes
+        self.expression = FixedDurationIntervalsExpression(self._group_by_ms).alias(name)
 
     # ------------------------------------------------------------------
     # Instance methods
@@ -138,14 +140,14 @@ class GroupByTimeEvent(Event):
         """
         return zlib.crc32(self.name.encode()) & 0x7FFFFFFF
 
-    def get_expression(self) -> TimeSeriesExpression | None:
-        """GroupByTimeEvent has no time-series expression.
+    def get_expression(self) -> TimeSeriesExpression:
+        """Return the fixed-duration interval expression for aggregations.
 
         Returns
         -------
-        None
+        TimeSeriesExpression
         """
-        return None
+        return self.expression
 
     def get_event_type_str(self) -> str:
         """Get the event type string for GroupByTimeEvent.
@@ -294,7 +296,7 @@ class GroupByTimeEvent(Event):
             f.least(
                 f.col("start_ts") + f.lit(group_by_ms),
                 f.col("end_ts"),
-            ).cast(LongType()),
+            ),
         )
 
         # Add event_name for downstream utilities

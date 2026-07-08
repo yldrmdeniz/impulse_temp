@@ -1,5 +1,6 @@
 """Unit tests for GroupByTimeEvent."""
 
+import pandas as pd
 import pytest
 import pyspark.sql.functions as f
 
@@ -116,9 +117,32 @@ class TestGetId:
 class TestGetExpression:
     """Tests for get_expression."""
 
-    def test_returns_none(self):
-        event = GroupByTimeEvent(name="no_expr", group_by_time="10m")
-        assert event.get_expression() is None
+    def test_returns_fixed_duration_expression(self):
+        event = GroupByTimeEvent(name="sliced_expr", group_by_time="10m")
+        assert event.get_expression() is not None
+        assert (
+            str(event.get_expression()) == "FixedDurationIntervalsExpression<duration_ms=600000>"
+        )
+
+    def test_expression_uses_cache_timestamp_units(self):
+        event = GroupByTimeEvent(name="sliced_expr", group_by_time="10m")
+
+        class Cache:
+            _ts_col = "tstart"
+            _te_col = "tend"
+            pdf = pd.DataFrame(
+                {
+                    "tstart": [1_499_929_242_072_000, 1_499_929_842_072_000],
+                    "tend": [1_499_929_842_072_000, 1_499_930_442_072_000],
+                }
+            )
+
+        intervals = event.get_expression().build(Cache())
+
+        assert intervals.get_data() == [
+            [1_499_929_242_072_000.0, 1_499_929_842_071_000.0],
+            [1_499_929_842_072_000.0, 1_499_930_442_071_000.0],
+        ]
 
 
 # ===========================================================================
@@ -149,7 +173,7 @@ class TestAsDict:
         assert d["event_name"] == "my_event"
         assert d["event_description"] == "test desc"
         assert d["required_channels"] is None
-        assert d["event_expression"] == "NA"
+        assert d["event_expression"] == "FixedDurationIntervalsExpression<duration_ms=600000>"
         assert isinstance(d["definition_hash"], int)
         assert d["attributes"]["grouped_by"] == "10m"
 
@@ -247,6 +271,28 @@ class TestDetermineEvents:
         container_count = df.select("container_id").distinct().count()
         total_slices = df.count()
         assert total_slices > container_count
+
+    def test_slices_have_distinct_event_instance_ids_per_container(self, spark, basic_narrow_db):
+        """Each generated time slice should have its own event instance ID."""
+        event = GroupByTimeEvent(name="small_slices", group_by_time="1s")
+
+        df = GroupByTimeEvent.determine_events(
+            spark,
+            [event],
+            query=basic_narrow_db.query,
+            solver=KeyValueStoreSolver(spark),
+        )
+
+        duplicate_id_groups = (
+            df.groupBy("container_id")
+            .agg(
+                f.count("event_instance_id").alias("slice_count"),
+                f.countDistinct("event_instance_id").alias("distinct_id_count"),
+            )
+            .filter(f.col("slice_count") != f.col("distinct_id_count"))
+            .count()
+        )
+        assert duplicate_id_groups == 0
 
 
 # ===========================================================================
@@ -348,8 +394,8 @@ class TestTimestampCorrectness:
                 f"!= container stop_ts {original_stop}"
             )
 
-    def test_slices_are_contiguous(self, spark, basic_narrow_db):
-        """Each slice's start_ts must equal the previous slice's end_ts (no gaps)."""
+    def test_slices_are_contiguous_without_boundary_gap(self, spark, basic_narrow_db):
+        """Each slice's start_ts must equal the previous slice's end_ts."""
         event = GroupByTimeEvent(name="contiguous_check", group_by_time="10m")
         solver = KeyValueStoreSolver(spark)
 
@@ -369,7 +415,7 @@ class TestTimestampCorrectness:
         gaps = df_with_prev.filter(
             (f.col("prev_end_ts").isNotNull()) & (f.col("start_ts") != f.col("prev_end_ts"))
         )
-        assert gaps.count() == 0, f"Found {gaps.count()} gaps between slices"
+        assert gaps.count() == 0, f"Found {gaps.count()} unexpected slice boundaries"
 
     def test_no_slice_exceeds_group_by_duration(self, spark, basic_narrow_db):
         """No slice duration should exceed the configured group_by_ms."""

@@ -172,7 +172,7 @@ def split_by_hash_change(
 def collect_solvable_expressions(
     items_by_type: dict[str, list],
     type_enum,
-    exclude_cls: type | None = None,
+    exclude_cls: type | tuple[type, ...] | None = None,
 ) -> list[TimeSeriesExpression]:
     """Collect all non-None expressions from typed items.
 
@@ -182,8 +182,8 @@ def collect_solvable_expressions(
         ``{type_name: [items]}``.
     type_enum : type
         ``EventType`` or ``AggregationType`` enum class.
-    exclude_cls : type | None
-        Skip any type whose class ``issubclass(cls, exclude_cls)``.
+    exclude_cls : type or tuple[type, ...] or None
+    Skip any type whose class ``issubclass(cls, exclude_cls)``.
 
     Returns
     -------
