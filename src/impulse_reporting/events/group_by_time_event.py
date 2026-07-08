@@ -241,7 +241,6 @@ class GroupByTimeEvent(Event):
         """
         event = events[0]
         group_by_ms = event._group_by_ms
-        boundary_gap_ms = 1
 
         # Resolve containers via solver filter pipeline
         container_tags_df = solver.filter_container_tags(spark, query)
@@ -297,8 +296,7 @@ class GroupByTimeEvent(Event):
             f.least(
                 f.col("start_ts") + f.lit(group_by_ms),
                 f.col("end_ts"),
-            )
-            - f.lit(boundary_gap_ms).cast(LongType()),
+            ),
         )
 
         # Add event_name for downstream utilities

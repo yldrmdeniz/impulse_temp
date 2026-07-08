@@ -46,12 +46,13 @@ class FixedDurationIntervalsExpression(TimeSeriesExpression):
 
         timestamp_magnitude = max(abs(start), abs(end))
         duration = self._milliseconds_in_cache_units(self.duration_ms, timestamp_magnitude)
-        boundary_gap = self._milliseconds_in_cache_units(1, timestamp_magnitude)
         starts = np.arange(start, end, duration, dtype=np.float64)
-        ends = np.minimum(starts + duration, end) - boundary_gap
+        ends = np.minimum(starts + duration, end)
         return Intervals(starts, ends, del_last_empty=True)
 
-    def _milliseconds_in_cache_units(self, milliseconds: float, timestamp_magnitude: float) -> float:
+    def _milliseconds_in_cache_units(
+        self, milliseconds: float, timestamp_magnitude: float
+    ) -> float:
         if timestamp_magnitude >= 1e18:
             return milliseconds * 1_000_000
         if timestamp_magnitude >= 1e15:

@@ -120,7 +120,9 @@ class TestGetExpression:
     def test_returns_fixed_duration_expression(self):
         event = GroupByTimeEvent(name="sliced_expr", group_by_time="10m")
         assert event.get_expression() is not None
-        assert str(event.get_expression()) == "FixedDurationIntervalsExpression<duration_ms=600000>"
+        assert (
+            str(event.get_expression()) == "FixedDurationIntervalsExpression<duration_ms=600000>"
+        )
 
     def test_expression_uses_cache_timestamp_units(self):
         event = GroupByTimeEvent(name="sliced_expr", group_by_time="10m")
@@ -360,8 +362,8 @@ class TestTimestampCorrectness:
                 f"!= container start_ts {original_start}"
             )
 
-    def test_last_slice_end_is_one_millisecond_before_container_stop(self, spark, basic_narrow_db):
-        """The last slice's end_ts must leave the configured 1ms boundary gap."""
+    def test_last_slice_end_matches_container_stop(self, spark, basic_narrow_db):
+        """The last slice's end_ts must equal the container's original stop_ts."""
         event = GroupByTimeEvent(name="ts_check", group_by_time="10m")
         solver = KeyValueStoreSolver(spark)
 
@@ -387,13 +389,13 @@ class TestTimestampCorrectness:
         }
 
         for cid, original_stop in original_stops.items():
-            assert max_ends[cid] == original_stop - 1, (
+            assert max_ends[cid] == original_stop, (
                 f"Container {cid}: last slice end_ts {max_ends[cid]} "
-                f"!= container stop_ts - 1ms {original_stop - 1}"
+                f"!= container stop_ts {original_stop}"
             )
 
-    def test_slices_have_one_millisecond_boundary_gap(self, spark, basic_narrow_db):
-        """Each slice's start_ts must be 1ms after the previous slice's end_ts."""
+    def test_slices_are_contiguous_without_boundary_gap(self, spark, basic_narrow_db):
+        """Each slice's start_ts must equal the previous slice's end_ts."""
         event = GroupByTimeEvent(name="contiguous_check", group_by_time="10m")
         solver = KeyValueStoreSolver(spark)
 
@@ -411,8 +413,7 @@ class TestTimestampCorrectness:
 
         # Filter to rows that have a previous slice (skip first slice per container)
         gaps = df_with_prev.filter(
-            (f.col("prev_end_ts").isNotNull())
-            & (f.col("start_ts") != f.col("prev_end_ts") + 1)
+            (f.col("prev_end_ts").isNotNull()) & (f.col("start_ts") != f.col("prev_end_ts"))
         )
         assert gaps.count() == 0, f"Found {gaps.count()} unexpected slice boundaries"
 
@@ -523,16 +524,16 @@ class TestGroupByTimeEventInReport:
         # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
         expected_slices = {
             1: [
-                (1751528502708, 1751528562707),
-                (1751528562708, 1751528610252),
+                (1751528502708, 1751528562708),
+                (1751528562708, 1751528610253),
             ],
             2: [
-                (1751528501483, 1751528561482),
-                (1751528561483, 1751528610234),
+                (1751528501483, 1751528561483),
+                (1751528561483, 1751528610235),
             ],
             3: [
-                (1751528500169, 1751528560168),
-                (1751528560169, 1751528610251),
+                (1751528500169, 1751528560169),
+                (1751528560169, 1751528610252),
             ],
         }
 
@@ -593,16 +594,16 @@ class TestGroupByTimeEventInReport:
         # cid=3: start=1751528500169, stop=1751528610252, dur=110083ms → 2 slices
         expected_slices = {
             1: [
-                (1751528502708, 1751528562707),
-                (1751528562708, 1751528610252),
+                (1751528502708, 1751528562708),
+                (1751528562708, 1751528610253),
             ],
             2: [
-                (1751528501483, 1751528561482),
-                (1751528561483, 1751528610234),
+                (1751528501483, 1751528561483),
+                (1751528561483, 1751528610235),
             ],
             3: [
-                (1751528500169, 1751528560168),
-                (1751528560169, 1751528610251),
+                (1751528500169, 1751528560169),
+                (1751528560169, 1751528610252),
             ],
         }
         expected_total = 6
